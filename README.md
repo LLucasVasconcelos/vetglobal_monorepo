@@ -112,8 +112,10 @@ Wait until it reports healthy:
 docker compose ps
 ```
 
-The port is bound to `127.0.0.1` only — the database is never reachable from
-the network.
+The port is published on one explicit address, never on `0.0.0.0`. It defaults
+to `127.0.0.1`, which keeps the database unreachable from the network; set
+`DB_BIND_HOST` in `.env` to expose it to another machine on purpose — and then
+`DB_HOST` has to match, or the application gets `ConnectionRefusedError`.
 
 ### 5. Apply the migrations
 

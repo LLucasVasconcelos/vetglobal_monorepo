@@ -10,10 +10,16 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:?missing DB_PASSWORD — see .env.example}
       POSTGRES_DB: ${DB_NAME:?missing DB_NAME — see .env.example}
     ports:
-      # Bound to loopback on purpose: the database must never be reachable from
-      # the network. A plain "5432:5432" binds 0.0.0.0 and would expose Postgres
-      # publicly when this runs on a server.
-      - "127.0.0.1:${DB_PORT:-5432}:5432"
+      # Always bound to ONE explicit address, never to 0.0.0.0: a plain
+      # "5432:5432" would expose Postgres to the whole network.
+      #
+      # The address is a variable because it is machine-specific. It defaults to
+      # loopback, so a fresh clone just works; set DB_BIND_HOST in .env to a
+      # private address of this machine (a tailnet address, for instance) to
+      # reach the database from another machine. Hard-coding such an address
+      # here would fail on anyone else's machine with "cannot assign requested
+      # address".
+      - "${DB_BIND_HOST:-127.0.0.1}:${DB_PORT:-5432}:5432"
     volumes:
       - vetglobal_db_data:/var/lib/postgresql/data
     healthcheck:
