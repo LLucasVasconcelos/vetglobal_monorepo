@@ -1,0 +1,3 @@
+# Tudo o que já existe no projeto fica fora do git — exceto o .ai-jail.
+.claude/
+scripts/
