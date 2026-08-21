@@ -56,6 +56,14 @@ async def clean_slate():
     yield
 
 
+@pytest.fixture
+async def db():
+    """A session for a test to look at the database directly -- to check what
+    the API stored, or to force a job into a state the worker would produce."""
+    async with SessionLocal() as session:
+        yield session
+
+
 @pytest.fixture(scope="session")
 async def client():
     transport = ASGITransport(app=app)

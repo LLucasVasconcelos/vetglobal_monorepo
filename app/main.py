@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api import auth
+from app.api import auth, documents, pets
 from app.core.errors import register_error_handlers
 
 DESCRIPTION = """
@@ -86,6 +86,8 @@ app = FastAPI(
 register_error_handlers(app)
 
 app.include_router(auth.router)
+app.include_router(pets.router)
+app.include_router(documents.router)
 
 
 @app.get(
