@@ -33,6 +33,11 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+# One event loop for the whole session. The SQLAlchemy engine is a module-level
+# singleton, and a pooled asyncpg connection belongs to the loop that opened it:
+# a loop per test would hand test B a connection attached to test A's dead loop.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.uv]
 package = false

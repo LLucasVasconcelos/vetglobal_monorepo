@@ -1,6 +1,5 @@
-# Tudo o que já existe no projeto fica fora do git — exceto o .ai-jail.
+# Configuração do editor/assistente, não do projeto.
 .claude/
-scripts/
 
 # D16 + D30 — enunciado, anotações e todo o material de planejamento são de
 # trabalho, não de entrega. Quem comunica com quem avalia é o README.
