@@ -4,11 +4,13 @@ The tests run against the real Postgres from `docker compose`, not a stub: the
 things that carry the weight here -- `SKIP LOCKED`, a unique index, `NOTIFY` --
 have no meaningful behaviour outside a real database.
 
-Which makes leftovers a real risk. `clean_tenant_data` empties the three tables
-the API writes to, both before and after the run: before, so a crashed earlier
-run cannot make today's assertions pass or fail for the wrong reason; after, so
-the database is left as it was found. `tenants` and `users` survive -- they are
-the seed, not test output.
+Which makes leftovers a real risk. The three tables the API writes to are
+emptied before every test, and everything is emptied at the end of the run, so
+the database is left as it was found.
+
+The two clinics the suite needs are created through `POST /auth/register`, like
+any other client would. That is deliberate: there is no fixture data that only
+exists in tests, so a path that works here works for a person with curl.
 """
 
 import pytest
@@ -17,30 +19,29 @@ from sqlalchemy import text
 
 from app.db.session import SessionLocal, engine
 from app.main import app
-from scripts.seed import SEED_PASSWORD, seed
 
-AURORA_EMAIL = "vet@aurora.test"
-BOREAL_EMAIL = "vet@boreal.test"
+PASSWORD = "Vetglobal#2026"
 
 # Truncated in one statement: `jobs` references `documents` references `pets`,
 # so any other order needs CASCADE to mean something. RESTART IDENTITY keeps ids
 # small and predictable between runs.
 WRITTEN_TABLES = "jobs, documents, pets"
+ALL_TABLES = "jobs, documents, pets, users, tenants"
 
 
-async def clean_tenant_data() -> None:
+async def truncate(tables: str) -> None:
     async with SessionLocal() as session:
-        await session.execute(text(f"TRUNCATE {WRITTEN_TABLES} RESTART IDENTITY CASCADE"))
+        await session.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
         await session.commit()
 
 
 @pytest.fixture(scope="session", autouse=True)
 async def database():
-    """The suite seeds itself, so a fresh clone needs no manual step before
-    `pytest`. Seeding is idempotent."""
-    await seed(quiet=True)
+    # Clinics and users too: the suite registers its own, so anything already
+    # here is a leftover, and a leftover email would collide on the unique index.
+    await truncate(ALL_TABLES)
     yield
-    await clean_tenant_data()
+    await truncate(ALL_TABLES)
     await engine.dispose()
 
 
@@ -52,7 +53,7 @@ async def clean_slate():
     id, and a pet left behind by an earlier test cannot be what makes a dedupe
     or isolation assertion pass.
     """
-    await clean_tenant_data()
+    await truncate(WRITTEN_TABLES)
     yield
 
 
@@ -71,21 +72,44 @@ async def client():
         yield c
 
 
-async def login(client: AsyncClient, email: str) -> str:
-    response = await client.post("/auth/login", json={"email": email, "password": SEED_PASSWORD})
+async def register(client: AsyncClient, clinic: str, email: str) -> dict:
+    response = await client.post(
+        "/auth/register",
+        json={"tenant_name": clinic, "email": email, "password": PASSWORD},
+    )
     response.raise_for_status()
-    return response.json()["access_token"]
+    return response.json()
 
 
 @pytest.fixture(scope="session")
-async def aurora_token(client: AsyncClient) -> str:
-    return await login(client, AURORA_EMAIL)
+async def aurora(client: AsyncClient) -> dict:
+    return await register(client, "Clinica Aurora", "vet@aurora.example.com")
 
 
 @pytest.fixture(scope="session")
-async def boreal_token(client: AsyncClient) -> str:
-    """The second tenant is what makes cross-tenant isolation testable at all."""
-    return await login(client, BOREAL_EMAIL)
+async def boreal(client: AsyncClient) -> dict:
+    """The second clinic is what makes cross-tenant isolation testable at all."""
+    return await register(client, "Clinica Boreal", "vet@boreal.example.com")
+
+
+@pytest.fixture(scope="session")
+async def aurora_token(aurora: dict) -> str:
+    return aurora["access_token"]
+
+
+@pytest.fixture(scope="session")
+async def aurora_email(aurora: dict) -> str:
+    return aurora["user"]["email"]
+
+
+@pytest.fixture(scope="session")
+async def boreal_token(boreal: dict) -> str:
+    return boreal["access_token"]
+
+
+@pytest.fixture(scope="session")
+async def boreal_email(boreal: dict) -> str:
+    return boreal["user"]["email"]
 
 
 def auth(token: str) -> dict[str, str]:

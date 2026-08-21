@@ -25,6 +25,39 @@ class Principal:
     tenant_id: int
 
 
+MIN_PASSWORD_LENGTH = 8
+
+
+def validate_password_strength(password: str) -> None:
+    """The whole password policy, in one place.
+
+    Raised as its own `error_code` rather than as a generic body-validation
+    failure: a client showing a signup form needs to tell "your password is too
+    weak, here is why" apart from "your request was malformed", and the message
+    names every rule that is missing at once -- not the first one, which would
+    make a user fix them one round trip at a time.
+    """
+    missing = []
+
+    if len(password) < MIN_PASSWORD_LENGTH:
+        missing.append(f"at least {MIN_PASSWORD_LENGTH} characters")
+    if not any(c.islower() for c in password):
+        missing.append("a lowercase letter")
+    if not any(c.isupper() for c in password):
+        missing.append("an uppercase letter")
+    # Whitespace excluded on purpose: a space is not alphanumeric either, and
+    # counting it would let "Password 1" pass as though it had a symbol.
+    if not any(not c.isalnum() and not c.isspace() for c in password):
+        missing.append("a symbol")
+
+    if missing:
+        raise DomainError(
+            422,
+            "WEAK_PASSWORD",
+            "Password must contain " + ", ".join(missing) + ".",
+        )
+
+
 def hash_password(plain: str) -> str:
     return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
 

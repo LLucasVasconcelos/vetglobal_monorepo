@@ -123,24 +123,26 @@ to `127.0.0.1`, which keeps the database unreachable from the network; set
 uv run alembic upgrade head
 ```
 
-### 6. Seed the demo tenants
+### 6. Create a clinic
+
+There is nothing to seed. Register through the API and you are logged in:
 
 ```bash
-uv run python -m scripts.seed
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"tenant_name":"Clinica Aurora","email":"vet@aurora.example.com","password":"Vetglobal#2026"}'
 ```
 
-There is no sign-up endpoint (deliberately out of scope), so logins come
-from here. It creates two clinics with one user each:
+The response carries an `access_token` — paste it into **Authorize** at
+<http://127.0.0.1:8000/docs> and every other route opens.
 
-| tenant | email | password |
-|---|---|---|
-| Clinica Aurora | `vet@aurora.test` | `vetglobal` |
-| Clinica Boreal | `vet@boreal.test` | `vetglobal` |
+Passwords need at least 8 characters with a lowercase letter, an uppercase
+letter and a symbol; anything less answers `422 WEAK_PASSWORD` naming every
+rule it missed.
 
-Two tenants is not decoration: it is what makes cross-tenant isolation testable —
-Aurora asking for a Boreal document has to get a `404`, not a `403`.
-
-The script is idempotent; running it twice changes nothing.
+**Register a second clinic** and you can watch tenant isolation work on data you
+created yourself: Aurora asking for a Boreal document gets a `404`, not a `403`.
+That second clinic is also what the test suite creates for the same reason.
 
 ---
 

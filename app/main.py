@@ -10,10 +10,14 @@ paste the token from step 1, and the padlocked routes open up.
 
 ### The walkthrough
 
-1. **`POST /auth/login`** — there is no sign-up. Users are seeded by
-   `uv run python -m scripts.seed`, which creates two clinics:
-   `vet@aurora.test` and `vet@boreal.test`, password `vetglobal` for both.
-   You get back a JWT carrying `{sub, tenant_id}`.
+1. **`POST /auth/register`** — creates a clinic and your account in it, and
+   hands back a JWT carrying `{sub, tenant_id}`. Nothing to seed and no
+   credentials to look up: register and you are logged in. `POST /auth/login`
+   is for an account you already have, and `POST /auth/users` adds a colleague
+   to your own clinic.
+
+   Register **twice**, with two different clinics, and you can watch the
+   isolation below work on data you created yourself.
 2. **`POST /pets`** — a pet belongs to the tenant *in your token*. It is never
    read from the body, so there is no field here to point at another clinic.
 3. **`POST /pets/{pet_id}/documents`** — send a `.txt`. Answers `202` with a

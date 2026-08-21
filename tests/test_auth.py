@@ -9,8 +9,7 @@ from app.api.deps import get_current_principal, require_internal_token
 from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.security import Principal, create_access_token, decode_access_token
-from scripts.seed import SEED_PASSWORD
-from tests.conftest import AURORA_EMAIL, BOREAL_EMAIL, auth
+from tests.conftest import PASSWORD, auth
 
 
 @pytest.fixture(scope="session")
@@ -37,9 +36,9 @@ async def guarded_client():
 # --- login ------------------------------------------------------------------
 
 
-async def test_login_returns_a_token_carrying_the_tenant(client):
+async def test_login_returns_a_token_carrying_the_tenant(client, aurora_email):
     response = await client.post(
-        "/auth/login", json={"email": AURORA_EMAIL, "password": SEED_PASSWORD}
+        "/auth/login", json={"email": aurora_email, "password": PASSWORD}
     )
 
     assert response.status_code == 200
@@ -51,21 +50,21 @@ async def test_login_returns_a_token_carrying_the_tenant(client):
     assert principal.tenant_id > 0
 
 
-async def test_the_two_tenants_get_different_tenant_ids(client):
+async def test_the_two_tenants_get_different_tenant_ids(client, aurora_email, boreal_email):
     """The whole isolation story rests on this being true."""
-    aurora = decode_access_token(await _token(client, AURORA_EMAIL))
-    boreal = decode_access_token(await _token(client, BOREAL_EMAIL))
+    first = decode_access_token(await _token(client, aurora_email))
+    second = decode_access_token(await _token(client, boreal_email))
 
-    assert aurora.tenant_id != boreal.tenant_id
+    assert first.tenant_id != second.tenant_id
 
 
 async def _token(client, email: str) -> str:
-    response = await client.post("/auth/login", json={"email": email, "password": SEED_PASSWORD})
+    response = await client.post("/auth/login", json={"email": email, "password": PASSWORD})
     return response.json()["access_token"]
 
 
-async def test_wrong_password_is_rejected_in_the_d22_envelope(client):
-    response = await client.post("/auth/login", json={"email": AURORA_EMAIL, "password": "nope"})
+async def test_wrong_password_is_rejected_in_the_d22_envelope(client, aurora_email):
+    response = await client.post("/auth/login", json={"email": aurora_email, "password": "nope"})
 
     assert response.status_code == 401
     assert response.json() == {
@@ -75,22 +74,22 @@ async def test_wrong_password_is_rejected_in_the_d22_envelope(client):
     }
 
 
-async def test_unknown_email_is_indistinguishable_from_a_wrong_password(client):
+async def test_unknown_email_is_indistinguishable_from_a_wrong_password(client, aurora_email):
     """Different answers here would turn login into a directory of registered
     addresses."""
     unknown = await client.post(
-        "/auth/login", json={"email": "nobody@nowhere.test", "password": SEED_PASSWORD}
+        "/auth/login", json={"email": "nobody@nowhere.test", "password": PASSWORD}
     )
-    wrong = await client.post("/auth/login", json={"email": AURORA_EMAIL, "password": "nope"})
+    wrong = await client.post("/auth/login", json={"email": aurora_email, "password": "nope"})
 
     assert unknown.status_code == wrong.status_code == 401
     assert unknown.json() == wrong.json()
 
 
-async def test_malformed_body_keeps_the_single_error_format(client):
+async def test_malformed_body_keeps_the_single_error_format(client, aurora_email):
     """FastAPI's own 422 is `{"detail": [...]}` -- a second error shape. The
     handler collapses it into the only one (invariant 5)."""
-    response = await client.post("/auth/login", json={"email": AURORA_EMAIL})
+    response = await client.post("/auth/login", json={"email": aurora_email})
 
     assert response.status_code == 422
     body = response.json()

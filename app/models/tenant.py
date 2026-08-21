@@ -12,7 +12,10 @@ class Tenant(Base):
     __tablename__ = "tenants"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    # Not unique: a clinic name is a label, not an identity -- two real
+    # clinics can share one. Forcing uniqueness would refuse a legitimate
+    # registration, and the 409 would say which names are already taken.
+    name: Mapped[str] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
