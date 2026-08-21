@@ -156,7 +156,19 @@ Something else already listens on 5432 — often another project's Postgres.
 Either stop it, or set a different `DB_PORT` in `.env` (for example `5433`).
 
 **`ConnectionRefusedError` on `alembic upgrade head`**
-The database is not up yet. Check `docker compose ps` and wait for `healthy`.
+First check `docker compose ps` and wait for `healthy`.
+
+If the container reports `healthy` but the `PORTS` column is **empty**, the
+container was created while the port was still taken: Compose kept the container
+but never published the mapping, and a later `docker compose up -d` only *starts*
+it without reapplying it. The database works internally and is unreachable from
+outside. Recreate it:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+`PORTS` should then read `127.0.0.1:5432->5432/tcp`.
 
 **`uv: command not found`**
 `~/.local/bin` is not on your `PATH` — see step 1.
