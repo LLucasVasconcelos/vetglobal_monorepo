@@ -121,6 +121,25 @@ the network.
 uv run alembic upgrade head
 ```
 
+### 6. Seed the demo tenants
+
+```bash
+uv run python -m scripts.seed
+```
+
+There is no sign-up endpoint (deliberately out of scope), so logins come
+from here. It creates two clinics with one user each:
+
+| tenant | email | password |
+|---|---|---|
+| Clinica Aurora | `vet@aurora.test` | `vetglobal` |
+| Clinica Boreal | `vet@boreal.test` | `vetglobal` |
+
+Two tenants is not decoration: it is what makes cross-tenant isolation testable —
+Aurora asking for a Boreal document has to get a `404`, not a `403`.
+
+The script is idempotent; running it twice changes nothing.
+
 ---
 
 ## Running
