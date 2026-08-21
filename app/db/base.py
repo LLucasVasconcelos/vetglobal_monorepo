@@ -1,6 +1,15 @@
 from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase
 
+# The width of every primary key here: SQLAlchemy maps `Mapped[int]` to Postgres
+# `integer`, so this is the largest id any of these tables can hold. Anything
+# larger arriving from a client is not a record we failed to find, it is a value
+# the column cannot store -- Postgres raises, the error is not an IntegrityError
+# so no handler catches it, and `GET /documents/2147483648` (a URL anyone can
+# type) comes back 500, against invariant 5. Lives here, next to the fact it
+# describes, and is enforced at the edge by `ResourceId` in `app/api/deps.py`.
+PG_INT_MAX = 2_147_483_647
+
 # Explicit naming convention so every index, unique key and foreign key has a
 # predictable name. Without it Postgres invents names and Alembic autogenerate
 # produces diffs that differ between machines.

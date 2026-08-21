@@ -2,12 +2,13 @@
 
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Path
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import DomainError
 from app.core.security import Principal, decode_access_token, internal_token_is_valid
+from app.db.base import PG_INT_MAX
 from app.db.session import get_db
 
 # auto_error=False so the failure comes out of our handler in the D22 envelope.
@@ -36,3 +37,14 @@ async def require_internal_token(
 
 CurrentPrincipal = Annotated[Principal, Depends(get_current_principal)]
 Db = Annotated[AsyncSession, Depends(get_db)]
+
+# Every id in a path, bounded to what the column can actually hold. Same shape of
+# bug as the over-long filename of D36 -- predictable client input arriving as a
+# 500 -- and the same answer: refuse it at the edge, where it is a 422 and not a
+# bug on our side.
+#
+# Declared once and shared, so a route added later inherits the bound instead of
+# having to remember it. `ge=1` comes along for free: ids start at 1, so 0 and
+# negatives are malformed rather than missing, and refusing them leaks nothing --
+# no tenant can own an id that cannot exist (D26).
+ResourceId = Annotated[int, Path(ge=1, le=PG_INT_MAX)]

@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from app.core.config import settings
+from app.db.base import PG_INT_MAX
 from app.models import Document, Job
 from tests.conftest import auth
 
@@ -366,3 +367,37 @@ async def test_a_database_error_never_carries_the_file_into_the_message(client, 
     message = str(caught.value)
     assert b"CONFIDENTIAL" not in message.encode()
     assert "clinical note" not in message
+
+
+@pytest.mark.parametrize(
+    "document_id",
+    [PG_INT_MAX + 1, 0, -1],
+    ids=["over-int4", "zero", "negative"],
+)
+async def test_a_document_id_no_row_could_have_is_422(client, aurora_token, document_id):
+    """`GET /documents/2147483648` is a URL anyone can type, and it used to be a
+    500: the id does not fit the `integer` primary key, Postgres raises, and the
+    error is not an `IntegrityError` so no handler caught it. Same shape of bug
+    as the over-long filename above (D36), and against the same invariant."""
+    response = await client.get(f"/documents/{document_id}", headers=auth(aurora_token))
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
+async def test_an_upload_to_a_pet_id_no_row_could_have_is_422(client, aurora_token):
+    response = await client.post(
+        f"/pets/{PG_INT_MAX + 1}/documents", files=txt(), headers=auth(aurora_token)
+    )
+
+    assert response.status_code == 422
+
+
+async def test_a_real_but_unknown_document_id_is_still_404(client, aurora_token):
+    """The bound above must not turn a legitimate miss into a validation error:
+    an id that *could* exist and does not is still `404`, and still says the same
+    thing whether or not it belongs to another clinic (D26)."""
+    response = await client.get("/documents/424242", headers=auth(aurora_token))
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "DOCUMENT_NOT_FOUND"

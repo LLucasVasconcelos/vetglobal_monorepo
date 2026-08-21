@@ -1,6 +1,6 @@
 from fastapi import APIRouter, File, Response, UploadFile, status
 
-from app.api.deps import CurrentPrincipal, Db
+from app.api.deps import CurrentPrincipal, Db, ResourceId
 from app.core.errors import documented_errors
 from app.schemas.document import UploadResponse
 from app.schemas.pet import PetCreate, PetResponse
@@ -59,7 +59,7 @@ async def post_pet(data: PetCreate, principal: CurrentPrincipal, db: Db) -> PetR
     ),
 )
 async def post_document(
-    pet_id: int,
+    pet_id: ResourceId,
     principal: CurrentPrincipal,
     db: Db,
     response: Response,

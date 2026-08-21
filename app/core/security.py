@@ -105,5 +105,14 @@ def decode_access_token(token: str) -> Principal:
 
 def internal_token_is_valid(candidate: str) -> bool:
     """`compare_digest` and not `==`: constant time, so the comparison does not
-    leak how many leading characters were right (D27)."""
-    return secrets.compare_digest(candidate, settings.internal_token)
+    leak how many leading characters were right (D27).
+
+    Compared as **bytes**, not as `str`: `compare_digest` refuses two strings
+    when either holds a non-ASCII character, and raises `TypeError`. A header of
+    `X-Internal-Token: café` therefore left through the 500 handler instead of
+    the 401 -- an unauthenticated caller crashing the check that is supposed to
+    stop them, and a distinguishable answer that tells them their token was
+    never even compared. Encoding first makes every possible header value a
+    plain 401.
+    """
+    return secrets.compare_digest(candidate.encode(), settings.internal_token.encode())

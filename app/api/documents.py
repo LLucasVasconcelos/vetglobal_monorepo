@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.deps import CurrentPrincipal, Db
+from app.api.deps import CurrentPrincipal, Db, ResourceId
 from app.core.errors import documented_errors
 from app.schemas.document import DocumentResponse, JobView
 from app.services.documents import get_document
@@ -29,7 +29,7 @@ router = APIRouter(tags=["documents"])
     ),
 )
 async def get_document_by_id(
-    document_id: int, principal: CurrentPrincipal, db: Db
+    document_id: ResourceId, principal: CurrentPrincipal, db: Db
 ) -> DocumentResponse:
     document, job = await get_document(db, principal, document_id)
 
