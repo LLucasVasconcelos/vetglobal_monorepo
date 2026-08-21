@@ -1,0 +1,27 @@
+services:
+  database:
+    image: postgres:16-alpine
+    container_name: vetglobal_postgres
+    # No default values on purpose: a missing variable must fail loudly here
+    # rather than silently start Postgres with different credentials than the
+    # ones the application reads from the same .env.
+    environment:
+      POSTGRES_USER: ${DB_USER:?missing DB_USER — run `cp .env.example .env` and fill it in}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?missing DB_PASSWORD — see .env.example}
+      POSTGRES_DB: ${DB_NAME:?missing DB_NAME — see .env.example}
+    ports:
+      # Bound to loopback on purpose: the database must never be reachable from
+      # the network. A plain "5432:5432" binds 0.0.0.0 and would expose Postgres
+      # publicly when this runs on a server.
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - vetglobal_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  vetglobal_db_data:
+    driver: local

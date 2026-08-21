@@ -7,7 +7,23 @@ scripts/
 docs/
 CLAUDE.md
 
+# Segredos — o .env.example é o template versionado; o .env, nunca.
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
 # Sujeira de editor
 .*.kate-swp
 *.swp
 *~
+
+# Toolchain local do sandbox onde o Claude roda comandos (uv + interpretadores).
+# Não faz parte do projeto: quem clona instala o uv normalmente, como diz o README.
+.tools/
