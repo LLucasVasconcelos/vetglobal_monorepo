@@ -16,6 +16,13 @@ from app.services.pets import get_pet
 TEXT_SUFFIX = ".txt"
 TEXT_CONTENT_TYPE = "text/plain"
 
+# The width of `documents.filename`. Checked here rather than left to the
+# database: Postgres answers a longer value with a truncation error, which is
+# not an IntegrityError, escapes every handler and surfaces as a 500 -- a
+# predictable client input producing the one status that is supposed to mean a
+# bug on our side (invariant 5).
+MAX_FILENAME_LENGTH = 255
+
 
 @dataclass(frozen=True, slots=True)
 class UploadOutcome:
@@ -46,6 +53,15 @@ def validate_upload(filename: str, raw: bytes) -> str:
             415,
             "UNSUPPORTED_FILE_TYPE",
             f"Only {TEXT_SUFFIX} files are accepted. PDF support is planned, not yet available.",
+        )
+
+    if len(filename) > MAX_FILENAME_LENGTH:
+        # Refused rather than truncated: a stored name that is not the name that
+        # was uploaded is a quiet lie in a record meant to be evidence (D14).
+        raise DomainError(
+            422,
+            "FILENAME_TOO_LONG",
+            f"Filename must be at most {MAX_FILENAME_LENGTH} characters.",
         )
 
     if len(raw) > settings.max_upload_bytes:

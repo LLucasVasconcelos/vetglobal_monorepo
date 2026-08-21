@@ -310,3 +310,59 @@ async def test_concurrent_identical_uploads_produce_exactly_one_document(
     assert await db.scalar(select(func.count()).select_from(Document)) == 1
     # And exactly one job: the loser must not enqueue a second one either.
     assert await db.scalar(select(func.count()).select_from(Job)) == 1
+
+
+# --- security regressions ---------------------------------------------------
+
+
+async def test_an_overlong_filename_is_refused_not_a_500(client, aurora_token):
+    """`documents.filename` is varchar(255). Postgres answers a longer value
+    with a truncation error, which is not an IntegrityError and escapes every
+    handler -- a client-supplied name would produce the one status that is
+    supposed to mean a bug on our side."""
+    pet_id = await create_pet(client, aurora_token)
+
+    response = await upload(client, aurora_token, pet_id, name="a" * 300 + ".txt")
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "FILENAME_TOO_LONG"
+
+
+async def test_a_filename_at_the_limit_still_works(client, aurora_token):
+    pet_id = await create_pet(client, aurora_token)
+    name = "a" * (255 - len(".txt")) + ".txt"
+
+    response = await upload(client, aurora_token, pet_id, name=name)
+
+    assert response.status_code == 202
+
+
+async def test_a_database_error_never_carries_the_file_into_the_message(client, aurora_token, db):
+    """SQLAlchemy appends bound parameters to database errors, and one of the
+    parameters of this INSERT is the document itself. Unguarded, a single failed
+    insert writes a clinical record in plain text to the application log."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from app.models import Document
+
+    pet_id = await create_pet(client, aurora_token)
+    secret = b"CONFIDENTIAL clinical note that must never reach a log file."
+
+    db.add(
+        Document(
+            pet_id=pet_id,
+            tenant_id=1,
+            filename="x" * 300,  # forces the truncation error
+            content_type="text/plain",
+            size_bytes=len(secret),
+            sha256="0" * 64,
+            content=secret,
+        )
+    )
+
+    with pytest.raises(SQLAlchemyError) as caught:
+        await db.flush()
+
+    message = str(caught.value)
+    assert b"CONFIDENTIAL" not in message.encode()
+    assert "clinical note" not in message

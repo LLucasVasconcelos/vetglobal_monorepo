@@ -54,7 +54,7 @@ async def post_pet(data: PetCreate, principal: CurrentPrincipal, db: Db) -> PetR
             "404": "PET_NOT_FOUND — no such pet, or it belongs to another clinic",
             "413": "FILE_TOO_LARGE — over the 10 MB limit",
             "415": "UNSUPPORTED_FILE_TYPE or FILE_CONTENT_MISMATCH — not a .txt, or not UTF-8",
-            "422": "FILE_EMPTY_OR_TOO_SHORT — nothing there worth summarizing",
+            "422": "FILE_EMPTY_OR_TOO_SHORT or FILENAME_TOO_LONG",
         }
     ),
 )
