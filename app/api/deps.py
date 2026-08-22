@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import Depends, Header, Path
+from fastapi import Depends, Header, Path, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,3 +68,15 @@ Db = Annotated[AsyncSession, Depends(get_db)]
 # negatives are malformed rather than missing, and refusing them leaks nothing --
 # no tenant can own an id that cannot exist (D26).
 ResourceId = Annotated[int, Path(ge=1, le=PG_INT_MAX)]
+
+# The poll's cursor. Same bound as `ResourceId` and for the same reason, but
+# `ge=0`: zero is not an id here, it is the D23 shorthand for "whatever the
+# latest job of this document is".
+AfterJobId = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=PG_INT_MAX,
+        description="The job to wait for. `0` means the latest job of this document (D23).",
+    ),
+]
