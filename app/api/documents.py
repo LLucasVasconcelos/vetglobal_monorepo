@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.deps import CurrentPrincipal, Db, ResourceId
+from app.api.deps import AUTH_401, CurrentPrincipal, Db, ResourceId
 from app.core.errors import documented_errors
 from app.schemas.document import DocumentResponse, JobView
 from app.services.documents import get_document
@@ -23,7 +23,7 @@ router = APIRouter(tags=["documents"])
     ),
     responses=documented_errors(
         **{
-            "401": "NOT_AUTHENTICATED — no token, or an invalid one",
+            "401": AUTH_401,
             "404": "DOCUMENT_NOT_FOUND — no such document, or it belongs to another clinic",
         }
     ),

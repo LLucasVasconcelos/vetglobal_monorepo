@@ -1,6 +1,6 @@
 from fastapi import APIRouter, status
 
-from app.api.deps import CurrentPrincipal, Db
+from app.api.deps import AUTH_401, CurrentPrincipal, Db
 from app.core.config import settings
 from app.core.errors import documented_errors
 from app.core.security import Principal, create_access_token
@@ -106,7 +106,7 @@ async def register(payload: RegisterRequest, db: Db) -> RegisterResponse:
     ),
     responses=documented_errors(
         **{
-            "401": "NOT_AUTHENTICATED — no token, or an invalid one",
+            "401": AUTH_401,
             "409": "EMAIL_ALREADY_REGISTERED — addresses are unique across the whole API",
             "422": "WEAK_PASSWORD, or VALIDATION_ERROR for a malformed email",
         }

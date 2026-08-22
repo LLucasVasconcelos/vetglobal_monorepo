@@ -64,6 +64,15 @@ async def require_internal_token(
         raise DomainError(401, "INVALID_INTERNAL_TOKEN", "Invalid or missing X-Internal-Token.")
 
 
+# The four ways a protected route can answer 401, in one place. `error_code` is
+# a machine contract (D22), so a code the API emits and the docs never name is a
+# branch a client cannot write until it meets one in production.
+AUTH_401 = (
+    "NOT_AUTHENTICATED, INVALID_TOKEN, TOKEN_EXPIRED or TOKEN_REVOKED — no token; "
+    "a malformed or wrongly-signed one; an expired one; or one whose account no longer "
+    "exists or moved clinic"
+)
+
 CurrentPrincipal = Annotated[Principal, Depends(get_current_principal)]
 Db = Annotated[AsyncSession, Depends(get_db)]
 

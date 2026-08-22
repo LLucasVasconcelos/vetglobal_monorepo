@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 
-from app.api.deps import CurrentPrincipal, Db, ResourceId
+from app.api.deps import AUTH_401, CurrentPrincipal, Db, ResourceId
 from app.core.errors import documented_errors
 from app.db.base import PG_INT_MAX
 from app.schemas.document import UploadResponse
@@ -33,7 +33,7 @@ Offset = Annotated[int, Query(ge=0, le=PG_INT_MAX, description="Rows to skip.")]
         "body, and that is the design: a field for it would be a field a caller could set to "
         "someone else's clinic."
     ),
-    responses=documented_errors(**{"401": "NOT_AUTHENTICATED — no token, or an invalid one"}),
+    responses=documented_errors(**{"401": AUTH_401}),
 )
 async def post_pet(data: PetCreate, principal: CurrentPrincipal, db: Db) -> PetResponse:
     pet = await create_pet(db, principal, data)
@@ -60,7 +60,7 @@ async def post_pet(data: PetCreate, principal: CurrentPrincipal, db: Db) -> PetR
     ),
     responses=documented_errors(
         **{
-            "401": "NOT_AUTHENTICATED — no token, or an invalid one",
+            "401": AUTH_401,
             "422": "VALIDATION_ERROR — limit above 200, or a negative offset",
         }
     ),
@@ -104,7 +104,7 @@ async def get_pets(
     responses=documented_errors(
         **{
             "200": "Already uploaded — deduplicated, no second copy stored",
-            "401": "NOT_AUTHENTICATED — no token, or an invalid one",
+            "401": AUTH_401,
             "404": "PET_NOT_FOUND — no such pet, or it belongs to another clinic",
             "413": "FILE_TOO_LARGE — over the 10 MB limit",
             "415": "UNSUPPORTED_FILE_TYPE or FILE_CONTENT_MISMATCH — not a .txt, or not UTF-8",

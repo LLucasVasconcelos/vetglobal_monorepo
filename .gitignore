@@ -1,5 +1,8 @@
-# Configuração do editor/assistente, não do projeto.
+# Configuração do editor/assistente, não do projeto (D1). O `scripts/` voltou pra
+# cá porque o install.sh do claude-toolkit deposita um `handoff.sh` ali — util
+# pro fluxo de dois repos do AgendPlan, e sem sentido neste, que é repo único.
 .claude/
+scripts/
 
 # D16 + D30 — enunciado, anotações e todo o material de planejamento são de
 # trabalho, não de entrega. Quem comunica com quem avalia é o README.
