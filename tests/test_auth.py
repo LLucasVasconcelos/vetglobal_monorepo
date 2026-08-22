@@ -4,6 +4,7 @@ import jwt
 import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
 from app.api.deps import get_current_principal, require_internal_token
 from app.core.config import settings
@@ -230,3 +231,73 @@ async def test_internal_route_with_the_right_token_passes(guarded_client):
     )
 
     assert response.status_code == 200
+
+
+# --- the token is a claim, not the answer (D40) -----------------------------
+
+
+async def test_a_token_stops_working_the_moment_its_user_is_deleted(client, aurora_token, db):
+    """A valid signature says who the bearer *was* when it was issued. Only the
+    database says who they are now.
+
+    Without the lookup this is the gap: an account is deleted and its holder
+    keeps reading clinical records until the token expires. Revocation that
+    takes up to an hour is not revocation.
+    """
+    created = await client.post(
+        "/auth/users",
+        json={"email": "demitido@aurora.example.com", "password": PASSWORD},
+        headers=auth(aurora_token),
+    )
+    login = await client.post(
+        "/auth/login", json={"email": "demitido@aurora.example.com", "password": PASSWORD}
+    )
+    token = login.json()["access_token"]
+
+    assert (await client.get("/pets", headers=auth(token))).status_code == 200, "sanity"
+
+    await db.execute(text("DELETE FROM users WHERE id = :id"), {"id": created.json()["id"]})
+    await db.commit()
+
+    response = await client.get("/pets", headers=auth(token))
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "TOKEN_REVOKED"
+
+
+async def test_a_token_we_signed_ourselves_for_a_user_that_never_existed_is_refused(client):
+    """Holding the signing key is not enough to invent a person. The signature
+    proves the token came from us; it does not make its subject real."""
+    token = create_access_token(Principal(user_id=987654, tenant_id=1))
+
+    response = await client.get("/pets", headers=auth(token))
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "TOKEN_REVOKED"
+
+
+async def test_a_token_naming_a_tenant_that_is_not_the_users_is_refused(client, aurora, boreal):
+    """The payload asserts a clinic; the row decides which one.
+
+    This is the case that would survive every other check in the file: real
+    user, real clinic, correct signature, not expired -- and the wrong pairing.
+    Reading `tenant_id` from the token instead of the row would hand Aurora's
+    user Boreal's records.
+    """
+    crossed = create_access_token(
+        Principal(user_id=aurora["user"]["id"], tenant_id=boreal["tenant"]["id"])
+    )
+
+    response = await client.get("/pets", headers=auth(crossed))
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "TOKEN_REVOKED"
+
+
+async def test_the_tenant_used_is_the_rows_and_not_the_payloads(client, aurora, aurora_token):
+    """The other half of the same rule: a token that agrees with the database
+    keeps working, so the check refuses mismatches rather than everything."""
+    response = await client.get("/pets", headers=auth(aurora_token))
+
+    assert response.status_code == 200
+    assert aurora["user"]["tenant_id"] == aurora["tenant"]["id"]

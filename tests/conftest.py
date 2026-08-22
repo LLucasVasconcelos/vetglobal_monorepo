@@ -4,21 +4,42 @@ The tests run against the real Postgres from `docker compose`, not a stub: the
 things that carry the weight here -- `SKIP LOCKED`, a unique index, `NOTIFY` --
 have no meaningful behaviour outside a real database.
 
-Which makes leftovers a real risk. The three tables the API writes to are
-emptied before every test, and everything is emptied at the end of the run, so
-the database is left as it was found.
+But not against the database you develop against. The suite needs to truncate
+freely between tests, and truncating a database somebody is also using by hand
+destroys their work -- which it did, more than once, before this file created
+its own. `DB_NAME` is redirected below to a **separate database**, created and
+migrated on first run, so "empty everything" is a statement about a database
+that holds nothing but test data. Anything you register or upload by hand lives
+in the other one and the suite cannot reach it.
 
 The two clinics the suite needs are created through `POST /auth/register`, like
 any other client would. That is deliberate: there is no fixture data that only
 exists in tests, so a path that works here works for a person with curl.
 """
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-from app.db.session import SessionLocal, engine
-from app.main import app
+# Set before importing anything from `app`: `app.core.config` builds `Settings`
+# at import time, and pydantic-settings reads the environment ahead of `.env`.
+# Imported first, this line is what redirects the whole suite; imported after
+# the application, it would do nothing at all and the tests would quietly run
+# against the development database again.
+TEST_DB_NAME = os.environ.get("TEST_DB_NAME", "vetglobal_test")
+os.environ["DB_NAME"] = TEST_DB_NAME
+
+import asyncpg  # noqa: E402
+import pytest  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy import text  # noqa: E402
+
+from app.core.config import settings  # noqa: E402
+from app.db.session import SessionLocal, engine  # noqa: E402
+from app.main import app  # noqa: E402
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 PASSWORD = "Vetglobal#2026"
 
@@ -35,10 +56,59 @@ async def truncate(tables: str) -> None:
         await session.commit()
 
 
+async def _create_test_database_if_missing() -> None:
+    """`CREATE DATABASE` cannot run against the database being created, so this
+    connects to the maintenance database `postgres` to ask for it."""
+    admin = await asyncpg.connect(
+        user=settings.db_user,
+        password=settings.db_password,
+        host=settings.db_host,
+        port=settings.db_port,
+        database="postgres",
+    )
+    try:
+        exists = await admin.fetchval(
+            "SELECT 1 FROM pg_database WHERE datname = $1", TEST_DB_NAME
+        )
+        if not exists:
+            # The name comes from this file or from TEST_DB_NAME, never from a
+            # request, and is quoted because it goes into DDL, which takes no
+            # bound parameters.
+            await admin.execute(f'CREATE DATABASE "{TEST_DB_NAME}"')
+    finally:
+        await admin.close()
+
+
+def _migrate_test_database() -> None:
+    """`alembic upgrade head` on the test database, as a subprocess.
+
+    Not imported and called: `migrations/env.py` ends in `asyncio.run()`, which
+    refuses to start inside the event loop pytest-asyncio is already running.
+
+    Running the real migrations rather than `metadata.create_all` is the point.
+    It costs a second per session and buys a suite that fails when the migrations
+    stop matching the models -- a green suite over a schema `alembic upgrade`
+    could no longer produce is a green suite that is lying about the deliverable.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=PROJECT_ROOT,
+        env={**os.environ, "DB_NAME": TEST_DB_NAME},
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"alembic upgrade head failed on {TEST_DB_NAME}:\n{result.stderr}")
+
+
 @pytest.fixture(scope="session", autouse=True)
 async def database():
-    # Clinics and users too: the suite registers its own, so anything already
-    # here is a leftover, and a leftover email would collide on the unique index.
+    await _create_test_database_if_missing()
+    _migrate_test_database()
+
+    # Safe to empty everything, including clinics and users: this database
+    # exists only for the suite. A leftover email from an interrupted run would
+    # otherwise collide on the unique index.
     await truncate(ALL_TABLES)
     yield
     await truncate(ALL_TABLES)
