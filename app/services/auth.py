@@ -40,6 +40,36 @@ async def authenticate(db: AsyncSession, email: str, password: str) -> Principal
     return Principal(user_id=user.id, tenant_id=user.tenant_id)
 
 
+async def resolve_principal(db: AsyncSession, claimed: Principal) -> Principal:
+    """Turn what a token *claims* into what the database *confirms* (D40).
+
+    `authenticate` answers "who is this, given credentials"; this answers "is
+    this still true, given a token issued earlier". A valid signature only says
+    who the bearer was at issue time -- trusting it alone means a deleted
+    account keeps reading records until the token expires, and an account moved
+    to another clinic keeps reading the old one's. Revocation that takes up to
+    an hour is not revocation.
+
+    So the row wins over the payload: the `tenant_id` returned is the stored
+    one, never the carried one. One primary-key lookup, on a request that was
+    going to query the database anyway.
+    """
+    user = await db.get(User, claimed.user_id)
+
+    if user is None or user.tenant_id != claimed.tenant_id:
+        # One code for both: the account is gone, or it is no longer the account
+        # this token describes. To the client they mean the same thing -- this
+        # token is finished, log in again -- and splitting them would only tell
+        # the bearer which of the two happened.
+        raise DomainError(
+            401,
+            "TOKEN_REVOKED",
+            "This token no longer matches an active account. Log in again.",
+        )
+
+    return Principal(user_id=user.id, tenant_id=user.tenant_id)
+
+
 async def register_tenant(
     db: AsyncSession, tenant_name: str, email: str, password: str
 ) -> tuple[Tenant, User]:

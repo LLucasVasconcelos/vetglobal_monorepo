@@ -10,7 +10,7 @@ from app.core.errors import DomainError
 from app.core.security import Principal, decode_access_token, internal_token_is_valid
 from app.db.base import PG_INT_MAX
 from app.db.session import get_db
-from app.models import User
+from app.services.auth import resolve_principal
 
 # auto_error=False so the failure comes out of our handler in the D22 envelope.
 # Left to itself, HTTPBearer answers 403 with `{"detail": "Not authenticated"}`
@@ -25,35 +25,17 @@ async def get_current_principal(
     """The `tenant_id` of every query comes from here, and from nowhere else --
     never from the body, never from a query parameter (invariant 4).
 
-    A valid signature is not enough. The token says who its bearer *was* when it
-    was issued; only the database says who they are now. Trusting the signature
-    alone means a deleted account keeps reading records until the token expires,
-    and an account moved to another clinic keeps reading the old clinic's --
-    revocation that takes up to an hour is not revocation (D40).
-
-    So the token is treated as an identity *claim*, and the row is the answer:
-    the `tenant_id` returned is the one in the database, never the one in the
-    payload. The cost is one primary-key lookup on a request that was going to
-    query the database anyway.
+    Two steps, and neither of them touches the database from this layer: decode
+    the token, then hand the claim to `resolve_principal`, which is where the
+    row that confirms or refuses it is read (D40). Keeping the query in the
+    service is not ceremony -- "rota -> service -> model" is a rule the whole
+    project follows, and the one file allowed to break it is the file that
+    teaches the next person the rule is optional.
     """
     if credentials is None:
         raise DomainError(401, "NOT_AUTHENTICATED", "Missing bearer token.")
 
-    claimed = decode_access_token(credentials.credentials)
-
-    user = await db.get(User, claimed.user_id)
-    if user is None or user.tenant_id != claimed.tenant_id:
-        # One code for both: the account is gone, or it is no longer the account
-        # this token describes. To the client they mean the same thing -- this
-        # token is finished, log in again -- and splitting them would only tell
-        # the bearer which of the two happened.
-        raise DomainError(
-            401,
-            "TOKEN_REVOKED",
-            "This token no longer matches an active account. Log in again.",
-        )
-
-    return Principal(user_id=user.id, tenant_id=user.tenant_id)
+    return await resolve_principal(db, decode_access_token(credentials.credentials))
 
 
 async def require_internal_token(
