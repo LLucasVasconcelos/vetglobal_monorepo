@@ -1,13 +1,26 @@
-from fastapi import APIRouter, File, Response, UploadFile, status
+from typing import Annotated
+
+from fastapi import APIRouter, File, Query, Response, UploadFile, status
 
 from app.api.deps import CurrentPrincipal, Db, ResourceId
 from app.core.errors import documented_errors
+from app.db.base import PG_INT_MAX
 from app.schemas.document import UploadResponse
-from app.schemas.pet import PetCreate, PetResponse
+from app.schemas.pet import PetCreate, PetListResponse, PetResponse
 from app.services.documents import upload_document
-from app.services.pets import create_pet
+from app.services.pets import create_pet, list_pets
 
 router = APIRouter(tags=["pets"])
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+# A list route with no ceiling is a route that returns the whole table the day
+# the table is big. The cap is on the *parameter*, so asking for more is a 422
+# and not a silently smaller page -- a client that thinks it read everything
+# because it asked for 10000 and got 200 is a client that skips records.
+Limit = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="Rows per page, at most 200.")]
+Offset = Annotated[int, Query(ge=0, le=PG_INT_MAX, description="Rows to skip.")]
 
 
 @router.post(
@@ -25,6 +38,47 @@ router = APIRouter(tags=["pets"])
 async def post_pet(data: PetCreate, principal: CurrentPrincipal, db: Db) -> PetResponse:
     pet = await create_pet(db, principal, data)
     return PetResponse.model_validate(pet)
+
+
+@router.get(
+    "/pets",
+    response_model=PetListResponse,
+    summary="Step 2b — list your clinic's pets, and see the isolation as a number",
+    description=(
+        "Every pet in **your** clinic, newest first — and nothing from anyone else's.\n\n"
+        "**This is the route to check tenant isolation on.** Register a second clinic, create "
+        "pets in both, and call this with each token: the two answers share a table and have "
+        "nothing in common. `total` counts only your clinic, so the isolation is a number you "
+        "can read rather than a claim you have to trust.\n\n"
+        "It is worth contrasting with `GET /documents/{id}`, which proves the same rule from "
+        "the other side: there, someone else's record answers `404`. That proves the negative "
+        "half — you cannot reach what is not yours. This proves the positive half — what you "
+        "*do* reach is exactly yours, and the count agrees.\n\n"
+        "There is no `tenant_id` parameter here, and that is the design: the filter comes from "
+        "the token, so there is nothing in this request to point somewhere else.\n\n"
+        "Paginated with `limit` (default 50, max 200) and `offset`."
+    ),
+    responses=documented_errors(
+        **{
+            "401": "NOT_AUTHENTICATED — no token, or an invalid one",
+            "422": "VALIDATION_ERROR — limit above 200, or a negative offset",
+        }
+    ),
+)
+async def get_pets(
+    principal: CurrentPrincipal,
+    db: Db,
+    limit: Limit = DEFAULT_PAGE_SIZE,
+    offset: Offset = 0,
+) -> PetListResponse:
+    pets, total = await list_pets(db, principal, limit, offset)
+
+    return PetListResponse(
+        items=[PetResponse.model_validate(pet) for pet in pets],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

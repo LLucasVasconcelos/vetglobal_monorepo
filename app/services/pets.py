@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import DomainError
@@ -19,6 +19,31 @@ async def create_pet(db: AsyncSession, principal: Principal, data: PetCreate) ->
     await db.commit()
     await db.refresh(pet)
     return pet
+
+
+async def list_pets(
+    db: AsyncSession, principal: Principal, limit: int, offset: int
+) -> tuple[list[Pet], int]:
+    """One page of this tenant's pets, newest first, plus how many it has.
+
+    The same `tenant_id` filter goes on both statements. Counting without it
+    would be the subtler half of a leak: the list would be right and the number
+    would quietly report how many pets the whole database holds.
+    """
+    mine = Pet.tenant_id == principal.tenant_id
+
+    pets = (
+        await db.scalars(
+            # Newest first: the pet somebody just created is the one they are
+            # looking for. `id` and not `created_at` because two rows written in
+            # the same transaction share a timestamp and would order at random.
+            select(Pet).where(mine).order_by(Pet.id.desc()).limit(limit).offset(offset)
+        )
+    ).all()
+
+    total = await db.scalar(select(func.count()).select_from(Pet).where(mine)) or 0
+
+    return list(pets), total
 
 
 async def get_pet(db: AsyncSession, principal: Principal, pet_id: int) -> Pet:

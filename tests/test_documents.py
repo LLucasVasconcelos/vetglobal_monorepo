@@ -67,6 +67,113 @@ async def test_tenant_id_in_the_body_is_ignored(client, aurora_token, boreal_tok
     assert stolen.status_code == 404
 
 
+# --- listing pets: the isolation read from the inside (D26) -----------------
+#
+# GET /documents/{id} proves the negative half of the rule -- you cannot reach
+# what is not yours. These prove the positive half: what you *do* reach is
+# exactly yours, and the count agrees.
+
+
+async def test_listing_pets_shows_mine_and_only_mine(client, aurora_token, boreal_token):
+    await create_pet(client, aurora_token, "Rex")
+    await create_pet(client, aurora_token, "Mel")
+    await create_pet(client, boreal_token, "Nina")
+
+    aurora = (await client.get("/pets", headers=auth(aurora_token))).json()
+    boreal = (await client.get("/pets", headers=auth(boreal_token))).json()
+
+    assert [p["name"] for p in aurora["items"]] == ["Mel", "Rex"], "newest first"
+    assert [p["name"] for p in boreal["items"]] == ["Nina"]
+
+    # Same table, same request, nothing in common -- which is the whole claim.
+    assert not {p["id"] for p in aurora["items"]} & {p["id"] for p in boreal["items"]}
+
+
+async def test_the_total_counts_only_my_clinic(client, aurora_token, boreal_token):
+    """The subtler half of a leak: a right list beside a wrong number. Counting
+    without the tenant filter would quietly report how many pets the whole
+    database holds."""
+    for name in ("Rex", "Mel", "Thor"):
+        await create_pet(client, aurora_token, name)
+    await create_pet(client, boreal_token, "Nina")
+
+    aurora = (await client.get("/pets", headers=auth(aurora_token))).json()
+    boreal = (await client.get("/pets", headers=auth(boreal_token))).json()
+
+    assert aurora["total"] == 3
+    assert boreal["total"] == 1
+
+
+async def test_a_clinic_with_no_pets_sees_an_empty_list_not_someone_elses(
+    client, aurora_token, boreal_token
+):
+    await create_pet(client, aurora_token, "Rex")
+
+    boreal = (await client.get("/pets", headers=auth(boreal_token))).json()
+
+    assert boreal["items"] == []
+    assert boreal["total"] == 0
+
+
+async def test_the_list_never_carries_the_tenant_id(client, aurora_token):
+    await create_pet(client, aurora_token, "Rex")
+
+    body = (await client.get("/pets", headers=auth(aurora_token))).json()
+
+    assert "tenant_id" not in body["items"][0]
+
+
+async def test_listing_pets_without_a_token_is_401(client):
+    response = await client.get("/pets")
+
+    assert response.status_code == 401
+    assert response.json()["error_code"] == "NOT_AUTHENTICATED"
+
+
+async def test_a_tenant_id_query_parameter_changes_nothing(client, aurora_token, boreal_token):
+    """There is no such parameter, so it is dropped. The filter comes from the
+    token, and there is nothing in the request that can point somewhere else."""
+    await create_pet(client, aurora_token, "Rex")
+    boreal_pet = await create_pet(client, boreal_token, "Nina")
+
+    body = (await client.get("/pets?tenant_id=1", headers=auth(boreal_token))).json()
+
+    assert [p["id"] for p in body["items"]] == [boreal_pet]
+
+
+async def test_paging_stays_inside_the_tenant(client, aurora_token, boreal_token):
+    """Isolation has to survive the second page too -- an offset that walked the
+    whole table instead of the filtered set would surface a neighbour's pet
+    exactly where nobody looks."""
+    mine = [await create_pet(client, aurora_token, f"Pet {i}") for i in range(5)]
+    await create_pet(client, boreal_token, "Nina")
+
+    seen = []
+    for offset in (0, 2, 4):
+        response = await client.get(f"/pets?limit=2&offset={offset}", headers=auth(aurora_token))
+        page = response.json()
+        seen += [p["id"] for p in page["items"]]
+        assert page["limit"] == 2 and page["offset"] == offset
+
+    assert sorted(seen) == sorted(mine), "every page, and only my pets"
+    assert len(seen) == len(set(seen)), "no row served twice across pages"
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["limit=0", "limit=201", "limit=-1", "offset=-1", "limit=abc"],
+    ids=["zero", "over-max", "negative", "negative-offset", "not-a-number"],
+)
+async def test_a_page_that_cannot_exist_is_422(client, aurora_token, query):
+    """The cap is on the parameter, not on the query: asking for 10000 is a 422,
+    not a silently smaller page. A client that thinks it read everything because
+    it asked for more and got 200 is a client that skips records."""
+    response = await client.get(f"/pets?{query}", headers=auth(aurora_token))
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
 # --- upload -----------------------------------------------------------------
 
 
