@@ -6,8 +6,15 @@ A document is uploaded for a pet, a summarization job is queued, a worker
 processes it, and the frontend follows progress through long polling —
 without holding any per-request state in process memory.
 
-> **Status:** early scaffolding. Endpoints are being implemented stage by stage;
-> only `GET /health` exists so far.
+> **Status:** the synchronous half is done and the queue runs. Registration,
+> authentication, pets, upload with deduplication, document read, and the
+> worker's `claim` / `complete` are all live — ten routes, 136 tests against a
+> real PostgreSQL.
+>
+> **Not there yet:** the long poll (`GET /documents/{id}/poll`), the standalone
+> worker process, and `.pdf` input. Deliberately out of scope, and stated as
+> such: OCR, row-level security, cloud storage, deployment, encryption at rest
+> and rate limiting.
 
 ---
 
@@ -162,6 +169,15 @@ uv run uvicorn app.main:app --reload
 uv run pytest -q
 ```
 
+The suite runs against a real PostgreSQL, not a stub — `SKIP LOCKED`, a unique
+index and `NOTIFY` have no meaningful behaviour anywhere else.
+
+It creates and migrates **its own database**, `vetglobal_test`, on first run.
+Nothing you register or upload by hand is ever touched: the tests need to
+truncate freely between cases, and a suite that truncates the database you are
+also using by hand destroys your work. Override the name with `TEST_DB_NAME` if
+it collides with something.
+
 ## Linting
 
 ```bash
@@ -211,7 +227,7 @@ docker compose down -v && docker compose up -d
 app/
   main.py       FastAPI application
   core/         settings, error handling, security
-  db/           engine, session, LISTEN/NOTIFY listener
+  db/           engine and session
   models/       SQLAlchemy models
   schemas/      Pydantic request/response models
   services/     business logic — routes never touch the database directly
@@ -219,3 +235,10 @@ app/
 migrations/     Alembic migrations
 tests/
 ```
+
+Two files the architecture calls for and that do not exist yet — listed here
+because their absence is the difference between what is designed and what is
+built: `app/db/listener.py`, the dedicated `LISTEN/NOTIFY` connection the long
+poll needs, and `worker.py`, the separate process that will drive
+`claim → summarize → complete`. Today that loop is driven by hand over HTTP,
+which is what makes it demonstrable with `curl`.

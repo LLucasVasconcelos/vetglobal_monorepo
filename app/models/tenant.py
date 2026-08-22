@@ -22,12 +22,18 @@ class Tenant(Base):
 
 
 class User(Base):
-    """A seeded login. There is no sign-up endpoint -- out of scope, see README.
+    """Someone who can log in. Created by `POST /auth/register`, which also
+    creates their clinic, or by `POST /auth/users` inside a clinic that already
+    exists (D35). There is no seed: registering is how the first account appears.
 
     `email` is unique across the whole table, not per tenant: login takes only
     an email and a password, so the tenant has to be derivable from the email
     alone. Two users sharing an email in different tenants would make the token
     ambiguous.
+
+    Deleting a row here ends the session it belongs to immediately: every
+    authenticated request looks the user up rather than trusting the token that
+    names them (D40).
     """
 
     __tablename__ = "users"
