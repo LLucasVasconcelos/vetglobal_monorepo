@@ -33,17 +33,31 @@ from app.core.errors import DomainError
 from app.core.security import Principal
 from app.db.listener import document_events
 from app.models import Document, Job
-from app.schemas.document import JobView, PollResponse
+from app.schemas.document import DocumentResponse, JobView, PollResponse
 from app.services.documents import document_not_found
 
 LATEST_JOB = 0
+
+# What `DocumentResponse` needs, and nothing else. `select(Document)` would drag
+# the file itself along -- up to 10 MB of `bytea` per poll, held for 25 seconds,
+# to answer with metadata that does not include it.
+_DOCUMENT_COLUMNS = (
+    Document.id,
+    Document.pet_id,
+    Document.filename,
+    Document.content_type,
+    Document.size_bytes,
+    Document.sha256,
+    Document.created_at,
+)
 
 
 async def wait_for_job(
     db: AsyncSession, principal: Principal, document_id: int, after_job_id: int
 ) -> PollResponse:
     with document_events.subscribe(document_id) as woken:
-        job_id = await _resolve_job_id(db, principal, document_id, after_job_id)
+        document = await _resolve_document(db, principal, document_id)
+        job_id = await _resolve_job_id(db, document_id, after_job_id)
         deadline = asyncio.get_running_loop().time() + settings.poll_timeout_seconds
 
         while True:
@@ -51,7 +65,15 @@ async def wait_for_job(
             job = await _read_job(db, job_id)
 
             if job.status.is_terminal:
-                return PollResponse(result=job, awaiting_job_id=job_id, timed_out=False)
+                # The document, with the job inside -- which is what the
+                # assignment asks a finished poll to return (D50). The document
+                # is read once and reused: its metadata cannot change while its
+                # job runs, and only the job is worth re-reading.
+                return PollResponse(
+                    result=document.model_copy(update={"job": job}),
+                    awaiting_job_id=job_id,
+                    timed_out=False,
+                )
 
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -67,9 +89,26 @@ async def wait_for_job(
                 )
 
 
-async def _resolve_job_id(
-    db: AsyncSession, principal: Principal, document_id: int, after_job_id: int
-) -> int:
+async def _resolve_document(
+    db: AsyncSession, principal: Principal, document_id: int
+) -> DocumentResponse:
+    """The document being polled, or a 404 that says nothing about why."""
+    row = (
+        await db.execute(
+            select(*_DOCUMENT_COLUMNS).where(
+                Document.id == document_id, Document.tenant_id == principal.tenant_id
+            )
+        )
+    ).one_or_none()
+
+    if row is None:
+        # Another clinic's document is a 404, never a 403 (D26, invariant 4).
+        raise document_not_found()
+
+    return DocumentResponse.model_validate(row)
+
+
+async def _resolve_job_id(db: AsyncSession, document_id: int, after_job_id: int) -> int:
     """Which job this poll is actually about, resolved once and then held.
 
     Resolved once on purpose: with `after_job_id=0` the answer is "the latest
@@ -77,16 +116,10 @@ async def _resolve_job_id(
     move the poll onto a newer job halfway through -- so the client would be
     told about a job it never asked for, under an `awaiting_job_id` that changed
     mid-request.
-    """
-    document = await db.scalar(
-        select(Document.id).where(
-            Document.id == document_id, Document.tenant_id == principal.tenant_id
-        )
-    )
-    if document is None:
-        # Another clinic's document is a 404, never a 403 (D26, invariant 4).
-        raise document_not_found()
 
+    The tenant was already settled by `_resolve_document`, and every lookup here
+    is scoped to that document -- so `after_job_id` is not a way around it.
+    """
     if after_job_id == LATEST_JOB:
         latest = await db.scalar(
             select(Job.id).where(Job.document_id == document_id).order_by(Job.id.desc()).limit(1)

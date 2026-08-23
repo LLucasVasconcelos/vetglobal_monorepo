@@ -6,7 +6,7 @@ A document is uploaded for a pet, a summarization job is queued, a worker
 processes it, and the client follows progress through long polling — without
 holding any per-request state in process memory.
 
-> **Status:** complete and running. Eleven routes, **177 tests** against a real
+> **Status:** complete and running. Eleven routes, **182 tests** against a real
 > PostgreSQL. Registration, authentication, pets, upload with deduplication,
 > document read, the queue with its `claim` / `complete`, a standalone worker
 > process, and the long poll over `LISTEN/NOTIFY` are all live.
@@ -42,10 +42,11 @@ assignment specified.
 Job states: `ENQUEUED → PROCESSING → DONE | FAILED`.
 
 The `/internal/*` routes take an `X-Internal-Token` header instead of the JWT.
-They exist as HTTP routes on purpose: with no worker process yet, this is what
-makes the queue loop demonstrable by hand — and being able to play the worker in
-one terminal while a poll waits in another is the fastest way to see the design
-work.
+They exist as HTTP routes on purpose: [the worker](#the-worker) calls exactly
+these two and has no other way in, which is what keeps it a separate service
+rather than the API under another filename. It also means the loop is
+demonstrable by hand — playing the worker in one terminal while a poll waits in
+another is the fastest way to see the design work.
 
 ### The walkthrough
 
@@ -64,7 +65,8 @@ curl -sX POST localhost:8000/pets/1/documents -H "Authorization: Bearer $TOKEN" 
   -F 'file=@consultation.txt'
 # {"document_id":1,"job_id":1,"status":"ENQUEUED"}
 
-# 4. Start waiting BEFORE any work happens. This blocks.
+# 4. Start waiting BEFORE any work happens. This blocks, then answers with
+#    the document — the same body GET /documents/1 gives, summary included.
 curl -s "localhost:8000/documents/1/poll?after_job_id=0" -H "Authorization: Bearer $TOKEN"
 
 # 5. In another terminal, play the worker.
@@ -145,7 +147,7 @@ is shaped to make confusing them hard.
 |---|---|---|
 | what ran out | this HTTP request (25s) | the processing itself (60s per attempt, 3 attempts) |
 | the job is | alive, still working | over |
-| the answer | `200` with `timed_out: true` | `200` with `result.status: FAILED`, `error_code: PROCESSING_TIMEOUT` |
+| the answer | `200` with `timed_out: true` | `200` with `result.job.status: FAILED`, `error_code: PROCESSING_TIMEOUT` |
 | the client should | ask again | show the failure |
 
 Treating the first as the second makes the UI announce an error on a document
@@ -162,8 +164,14 @@ so it needs justifying:
 
 `204` has nowhere to carry the cursor, and a bare `null` cannot distinguish
 "not yet" from "finished, and empty". This envelope answers both and hands back
-what to call again with, so the client keeps no state between requests. The same
-shape comes back on success, with `result` filled in.
+what to call again with, so the client keeps no state between requests.
+
+On success `result` is **the document** — byte for byte what
+`GET /documents/{id}` returns, with the job and its `summary` nested inside. One
+parser for both endpoints, and no ambiguity about whose `id` is at the top: an
+earlier version answered with the job alone, whose `id` sat next to a
+`document_id` in the url that is usually the same small number, with nothing in
+the payload saying which was which.
 
 `after_job_id=0` — the value in the assignment's own example, where no job `0`
 exists — means *the latest job of this document*, resolved server-side. The
@@ -185,6 +193,13 @@ report the same job twice, so a repeat must be silent: same verdict again is
 `200` with `applied: false`, and nothing is written. But `FAILED` over a job
 already `DONE` is not a retry, it is a bug — that answers `409`, because
 swallowing it would let an error replace a summary.
+
+The failure payload accepts both shapes: `{"status": "FAILED", "error": "…"}`,
+which is the assignment's own example, and `{"status": "FAILED", "error_code":
+"…", "message": "…"}`, which is what the rest of this API speaks. The first
+fills in as the second, with `WORKER_REPORTED_FAILURE` for the code — "the
+worker said it failed, without saying what kind" is exactly what that payload
+carries. Prefer the second: a code is what a client branches on.
 
 ### 5. Queue semantics without a queue
 

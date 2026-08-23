@@ -122,7 +122,7 @@ async def test_the_worker_answers_a_polling_client(client, aurora_token, worker_
     await worker.run_once(worker_client)
 
     polled = await asyncio.wait_for(waiting, timeout=10)
-    assert polled.json()["result"]["summary"] == worker.summarize(LONG_NOTE.decode())
+    assert polled.json()["result"]["job"]["summary"] == worker.summarize(LONG_NOTE.decode())
 
 
 async def test_two_workers_take_two_different_jobs(client, aurora_token):

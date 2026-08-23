@@ -110,7 +110,7 @@ async def test_a_job_that_finished_before_the_poll_started_answers_at_once(
     body = response.json()
     assert body["timed_out"] is False
     assert body["awaiting_job_id"] == upload["job_id"]
-    assert body["result"]["status"] == verdict["status"]
+    assert body["result"]["job"]["status"] == verdict["status"]
     assert elapsed < 1, "a job that was already finished should not have been waited for"
 
 
@@ -122,9 +122,9 @@ async def test_a_done_job_carries_its_summary_out_of_the_poll(client, aurora_tok
 
     body = (await poll(client, aurora_token, upload["document_id"])).json()
 
-    assert body["result"]["summary"] == SUMMARY
-    assert body["result"]["finished_at"] is not None
-    assert body["result"]["error_code"] is None
+    assert body["result"]["job"]["summary"] == SUMMARY
+    assert body["result"]["job"]["finished_at"] is not None
+    assert body["result"]["job"]["error_code"] is None
 
 
 # --- the fast path: NOTIFY, with the recheck turned off ---------------------
@@ -148,7 +148,7 @@ async def test_an_open_poll_wakes_the_instant_the_job_is_completed(client, auror
     elapsed = time.perf_counter() - started
 
     assert response.status_code == 200
-    assert response.json()["result"]["summary"] == SUMMARY
+    assert response.json()["result"]["job"]["summary"] == SUMMARY
     assert elapsed < 3, "the poll did not wake on the notification"
 
 
@@ -192,7 +192,7 @@ async def test_a_job_finishing_between_the_read_and_the_wait_is_not_missed(
 
     assert finished, "the test did not exercise the window it exists for"
     assert response.json()["timed_out"] is False
-    assert response.json()["result"]["status"] == JobStatus.DONE
+    assert response.json()["result"]["job"]["status"] == JobStatus.DONE
     assert elapsed < 3, "the notification was emitted with nobody listening"
 
 
@@ -209,7 +209,7 @@ async def test_two_polls_on_the_same_document_both_wake(client, aurora_token, cl
 
     a, b = await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
 
-    assert a.json()["result"]["summary"] == b.json()["result"]["summary"] == SUMMARY
+    assert a.json()["result"]["job"]["summary"] == b.json()["result"]["job"]["summary"] == SUMMARY
 
 
 async def test_a_completion_on_another_document_does_not_answer_this_poll(
@@ -262,7 +262,7 @@ async def test_the_recheck_answers_when_no_notification_was_ever_sent(
     response = await asyncio.wait_for(waiting, timeout=15)
     elapsed = time.perf_counter() - started
 
-    assert response.json()["result"]["summary"] == "Closed without telling anybody."
+    assert response.json()["result"]["job"]["summary"] == "Closed without telling anybody."
     assert elapsed < 5, "the recheck did not pick the job up"
 
 
@@ -286,8 +286,8 @@ async def test_the_lease_running_out_wakes_an_open_poll(client, aurora_token, cl
 
     body = response.json()
     assert body["timed_out"] is False, "the poll waited for its recheck instead"
-    assert body["result"]["status"] == JobStatus.FAILED
-    assert body["result"]["error_code"] == "PROCESSING_TIMEOUT"
+    assert body["result"]["job"]["status"] == JobStatus.FAILED
+    assert body["result"]["job"]["error_code"] == "PROCESSING_TIMEOUT"
 
 
 # --- timing out is not failing (D19, invariant 6) ---------------------------
@@ -331,7 +331,7 @@ async def test_a_poll_that_timed_out_can_be_resumed_with_what_it_returned(
 
     assert second["timed_out"] is False
     assert second["awaiting_job_id"] == first["awaiting_job_id"]
-    assert second["result"]["summary"] == SUMMARY
+    assert second["result"]["job"]["summary"] == SUMMARY
 
 
 # --- which job is being waited for (D20, D23) -------------------------------
@@ -385,7 +385,7 @@ async def test_an_explicit_job_id_waits_for_that_job_and_not_the_latest(
     body = (await poll(client, aurora_token, upload["document_id"], upload["job_id"])).json()
 
     assert body["awaiting_job_id"] == upload["job_id"]
-    assert body["result"]["error_code"] == "EXTRACTION_FAILED"
+    assert body["result"]["job"]["error_code"] == "EXTRACTION_FAILED"
 
 
 async def test_a_job_belonging_to_another_document_is_404(client, aurora_token, clocks):
@@ -523,7 +523,7 @@ async def test_a_notification_from_another_connection_wakes_the_poll(
 
     response = await asyncio.wait_for(waiting, timeout=10)
 
-    assert response.json()["result"]["summary"] == "Written by another instance entirely."
+    assert response.json()["result"]["job"]["summary"] == "Written by another instance entirely."
 
 
 async def test_the_listener_reconnects_after_its_connection_is_killed(
@@ -563,4 +563,43 @@ async def test_the_listener_reconnects_after_its_connection_is_killed(
     await complete(client, upload["job_id"])
 
     response = await asyncio.wait_for(waiting, timeout=10)
-    assert response.json()["result"]["summary"] == SUMMARY
+    assert response.json()["result"]["job"]["summary"] == SUMMARY
+
+
+async def test_the_answer_is_the_document_and_not_only_the_job(client, aurora_token, clocks):
+    """What the assignment asks a finished poll to return: *the document* (D50).
+
+    Returning the job alone was ambiguous in the worst possible way -- `result.id`
+    was the job id, sitting next to a `document_id` in the url that is usually
+    the same small number, and nothing in the payload said which one it was.
+    """
+    clocks(timeout=25, recheck=NO_RECHECK)
+    upload = await enqueue(client, aurora_token)
+    await claim(client)
+    await complete(client, upload["job_id"])
+
+    result = (await poll(client, aurora_token, upload["document_id"])).json()["result"]
+
+    assert result["id"] == upload["document_id"]
+    assert result["pet_id"] == upload["pet_id"]
+    assert result["filename"] == "consultation.txt"
+    assert result["job"]["id"] == upload["job_id"]
+    assert result["job"]["summary"] == SUMMARY
+    # The same shape the plain read returns, so a client has one parser, not two.
+    direct = (
+        await client.get(f"/documents/{upload['document_id']}", headers=auth(aurora_token))
+    ).json()
+    assert result == direct
+
+
+async def test_the_document_is_not_carried_around_with_its_bytes(client, aurora_token, clocks):
+    """The poll reads the columns it answers with, never `content`: a 10 MB
+    file held for 25 seconds per waiting client is not metadata."""
+    clocks(timeout=25, recheck=NO_RECHECK)
+    upload = await enqueue(client, aurora_token)
+    await claim(client)
+    await complete(client, upload["job_id"])
+
+    result = (await poll(client, aurora_token, upload["document_id"])).json()["result"]
+
+    assert "content" not in result

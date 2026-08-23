@@ -85,7 +85,7 @@ async def test_the_whole_walkthrough(client, walkthrough_token):
     assert polled.status_code == 200
     assert polled.json()["timed_out"] is False
     assert polled.json()["awaiting_job_id"] == job_id, "`0` resolved to the wrong job"
-    assert polled.json()["result"]["summary"] == SUMMARY
+    assert polled.json()["result"]["job"]["summary"] == SUMMARY
 
     # 7. And the same result is there for anyone reading the document later.
     document = await client.get(f"/documents/{document_id}", headers=token)

@@ -69,6 +69,15 @@ class CompleteRequest(BaseModel):
         max_length=MAX_MESSAGE_LENGTH,
         description="Human-readable reason for a failure.",
     )
+    error: str | None = Field(
+        default=None,
+        max_length=MAX_MESSAGE_LENGTH,
+        description=(
+            "Accepted as a synonym for `message`, because it is the field name in the "
+            "assignment's own failure example. Prefer `error_code` + `message`: this one "
+            "cannot say *what kind* of failure it was, which is what a client branches on."
+        ),
+    )
     attempt: int | None = Field(
         default=None,
         ge=1,
@@ -85,6 +94,18 @@ class CompleteRequest(BaseModel):
 
     @model_validator(mode="after")
     def check_payload_matches_status(self) -> "CompleteRequest":
+        # The assignment's failure example is `{"status": "FAILED", "error":
+        # "Could not parse document"}` -- one human string, where D22 asks for a
+        # machine `error_code` and a human `message`. Both are accepted, because
+        # answering the example printed in the brief with a 422 is a contract
+        # argument won at the reader's expense. `error` fills `message`, and
+        # stands in for a code only when none was given (D49).
+        if self.error is not None:
+            if self.status is JobStatus.DONE:
+                raise ValueError("error is a failure field and cannot be sent with DONE")
+            self.message = self.message or self.error
+            self.error_code = self.error_code or "WORKER_REPORTED_FAILURE"
+
         # Refused here rather than stored: a DONE job with no summary is a
         # document the client will poll to completion and get nothing from.
         # `.strip()` and not merely emptiness -- a summary of three spaces is

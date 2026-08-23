@@ -563,3 +563,59 @@ async def test_an_exhausted_lease_is_only_noticed_when_somebody_claims(client, a
     document = await client.get(f"/documents/{upload['document_id']}", headers=auth(aurora_token))
     assert document.json()["job"]["status"] == JobStatus.FAILED
     assert document.json()["job"]["error_code"] == "PROCESSING_TIMEOUT"
+
+
+# --- the assignment's own payloads, taken literally (D49) -------------------
+
+
+async def test_the_failure_payload_printed_in_the_assignment_is_accepted(client, aurora_token):
+    """`{"status": "FAILED", "error": "Could not parse document"}` -- the exact
+    example from the brief, which used to be answered `422 VALIDATION_ERROR`
+    because `extra="forbid"` and D22 asks for `error_code` instead.
+
+    Winning that argument against the reader's first hand-written request is
+    not winning anything.
+    """
+    upload = await enqueue(client, aurora_token)
+    await client.post("/internal/jobs/claim", headers=INTERNAL)
+
+    response = await client.post(
+        f"/internal/jobs/{upload['job_id']}/complete",
+        json={"status": "FAILED", "error": "Could not parse document"},
+        headers=INTERNAL,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == JobStatus.FAILED
+    # It lands as a message, and gets a code so the D22 envelope stays whole.
+    assert response.json()["message"] == "Could not parse document"
+    assert response.json()["error_code"] == "WORKER_REPORTED_FAILURE"
+
+
+async def test_an_explicit_error_code_still_wins_over_the_synonym(client, aurora_token):
+    upload = await enqueue(client, aurora_token)
+    await client.post("/internal/jobs/claim", headers=INTERNAL)
+
+    response = await client.post(
+        f"/internal/jobs/{upload['job_id']}/complete",
+        json={"status": "FAILED", "error": "Could not parse document", "error_code": "BAD_PDF"},
+        headers=INTERNAL,
+    )
+
+    assert response.json()["error_code"] == "BAD_PDF"
+    assert response.json()["message"] == "Could not parse document"
+
+
+async def test_error_sent_with_done_is_refused(client, aurora_token):
+    """`error` is a failure field. Accepting it next to DONE would store a
+    contradiction nobody would ever read back."""
+    upload = await enqueue(client, aurora_token)
+    await client.post("/internal/jobs/claim", headers=INTERNAL)
+
+    response = await client.post(
+        f"/internal/jobs/{upload['job_id']}/complete",
+        json={"status": "DONE", "summary": "A summary.", "error": "but also broken"},
+        headers=INTERNAL,
+    )
+
+    assert response.status_code == 422
