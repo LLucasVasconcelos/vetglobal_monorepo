@@ -12,13 +12,16 @@ keep: it is invariant 2 written as an executable assertion.
 """
 
 import asyncio
+import json
 import time
 
+import asyncpg
 import pytest
 from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.base import PG_INT_MAX
+from app.db.listener import CHANNEL
 from app.models import JobStatus
 from app.services import poll as poll_service
 
@@ -448,3 +451,116 @@ async def test_an_after_job_id_no_row_could_have_is_422(client, aurora_token, af
 
     assert response.status_code == 422
     assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
+# --- the listener itself, as infrastructure ---------------------------------
+
+
+async def listener_backend_pid(db) -> int:
+    """The Postgres backend holding this instance's `LISTEN`.
+
+    Found by its last statement: `add_listener` issues `LISTEN "..."` and that
+    connection never runs anything else, so it is the only backend on this
+    database whose current query starts that way.
+    """
+    pid = await db.scalar(
+        text(
+            "SELECT pid FROM pg_stat_activity "
+            "WHERE datname = current_database() AND query ILIKE 'LISTEN%'"
+        )
+    )
+    await db.rollback()
+    assert pid is not None, "no backend is listening -- the lifespan did not run"
+    return pid
+
+
+async def test_a_notification_from_another_connection_wakes_the_poll(
+    client, aurora_token, clocks, db
+):
+    """What "stateless across instances" means in practice, and the reason the
+    fan-out in memory does not break invariant 1.
+
+    The job is closed and announced from a connection this process does not
+    serve requests on -- the shape of a second API instance behind a load
+    balancer, or of a worker writing straight to the database. The waiter is
+    here, in this process's memory, and wakes anyway: what binds the two is the
+    Postgres channel, not shared memory. With the recheck off, nothing else
+    could have answered.
+    """
+    clocks(timeout=25, recheck=NO_RECHECK)
+    upload = await enqueue(client, aurora_token)
+    await claim(client)
+
+    waiting = asyncio.create_task(poll(client, aurora_token, upload["document_id"]))
+    await asyncio.sleep(0.2)
+
+    outsider = await asyncpg.connect(
+        user=settings.db_user,
+        password=settings.db_password,
+        host=settings.db_host,
+        port=settings.db_port,
+        database=settings.db_name,
+    )
+    try:
+        await outsider.execute(
+            "UPDATE jobs SET status = 'DONE', summary = $1, finished_at = now() WHERE id = $2",
+            "Written by another instance entirely.",
+            upload["job_id"],
+        )
+        await outsider.execute(
+            "SELECT pg_notify($1, $2)",
+            CHANNEL,
+            json.dumps(
+                {
+                    "document_id": upload["document_id"],
+                    "job_id": upload["job_id"],
+                    "status": "DONE",
+                }
+            ),
+        )
+    finally:
+        await outsider.close()
+
+    response = await asyncio.wait_for(waiting, timeout=10)
+
+    assert response.json()["result"]["summary"] == "Written by another instance entirely."
+
+
+async def test_the_listener_reconnects_after_its_connection_is_killed(
+    client, aurora_token, clocks, db
+):
+    """The database restarts, or an admin kills the backend. The fast path has
+    to come back on its own -- a listener that stays down would leave every poll
+    on this instance silently degraded to the recheck for the life of the
+    process, which is the kind of failure nobody notices until a demo.
+
+    Killing it is also a live rehearsal of the safety net: while the connection
+    is gone, correctness is entirely the recheck's job.
+    """
+    clocks(timeout=25, recheck=NO_RECHECK)
+    pid = await listener_backend_pid(db)
+
+    await db.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+    await db.commit()
+
+    for _ in range(100):
+        if not poll_service.document_events._listening.is_set():
+            break
+        await asyncio.sleep(0.1)
+    else:
+        pytest.fail("the listener did not notice its connection had been terminated")
+
+    await asyncio.wait_for(poll_service.document_events.wait_until_listening(), timeout=20)
+
+    # And it is a working listener, not merely a connected one.
+    reborn = await listener_backend_pid(db)
+    assert reborn != pid, "the same backend cannot have come back from the dead"
+
+    upload = await enqueue(client, aurora_token)
+    await claim(client)
+    waiting = asyncio.create_task(poll(client, aurora_token, upload["document_id"]))
+    await asyncio.sleep(0.2)
+    await complete(client, upload["job_id"])
+
+    response = await asyncio.wait_for(waiting, timeout=10)
+    assert response.json()["result"]["summary"] == SUMMARY
