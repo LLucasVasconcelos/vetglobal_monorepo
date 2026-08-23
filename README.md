@@ -268,6 +268,26 @@ another clinic. A resource belonging to someone else answers `404`: ids are
 sequential, `GET /documents/41` is a guess anyone can make, and `403` would
 confirm the guess was right, which is itself the leak.
 
+**Why the ids are sequential, and what UUID would cost.** Sequential ids are
+what make this rule *testable*: `/documents/41` is a guess anyone can make, so
+the filter above has to be real rather than assumed. UUIDs would not have made
+the API safer — an unguessable id is obscurity, and it leaks through a log, a
+screenshot or a shared link, while the query stays unfiltered underneath.
+
+What they would cost is ordering. Six queries here order by id, and two of them
+mean something: `ORDER BY jobs.id` **is** the FIFO of the queue, and
+`ORDER BY jobs.id DESC LIMIT 1` is "the latest attempt at this document".
+`created_at` does not substitute — rows written in one transaction share a
+timestamp and break the tie at random, which also makes offset pagination repeat
+or skip rows. UUIDv7, being time-ordered, would preserve all six; UUIDv4 would
+not.
+
+The honest cost of what is here: sequential ids leak volume. Register, upload
+once, read your id, and you know roughly how much the platform has processed.
+The moment to switch is when an id starts appearing in a URL that leaves the
+organization — and then it goes in *alongside* the tenant filter, never instead
+of it.
+
 **The token is a claim, not the answer.** Each authenticated request reads the
 user row and builds the principal from *it*, not from the JWT payload. Without
 that, a deleted account keeps reading records until its token expires, and
