@@ -87,6 +87,16 @@ Db = Annotated[AsyncSession, Depends(get_db)]
 # no tenant can own an id that cannot exist (D26).
 ResourceId = Annotated[int, Path(ge=1, le=PG_INT_MAX)]
 
+# Paging, shared by every list route. A list with no ceiling returns the whole
+# table the day the table is big, and the cap is on the *parameter* so asking for
+# more is a 422 rather than a silently smaller page -- a client that thinks it
+# read everything because it asked for 10000 and got 200 is a client that skips
+# records (D39).
+MAX_PAGE_SIZE = 200
+
+Limit = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="Rows per page, at most 200.")]
+Offset = Annotated[int, Query(ge=0, le=PG_INT_MAX, description="Rows to skip.")]
+
 # The poll's cursor. Same bound as `ResourceId` and for the same reason, but
 # `ge=0`: zero is not an id here, it is the D23 shorthand for "whatever the
 # latest job of this document is".

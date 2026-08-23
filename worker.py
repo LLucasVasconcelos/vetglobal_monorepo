@@ -33,11 +33,14 @@ the other.
 
 import asyncio
 import contextlib
+import io
 import logging
 import re
 import signal
+from base64 import b64decode
 
 import httpx
+import pypdf
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("worker")
@@ -68,8 +71,51 @@ SUMMARY_SENTENCES = 3
 SUMMARY_MAX_CHARS = 600
 
 
+PDF_CONTENT_TYPE = "application/pdf"
+# Below this, whatever came out of the PDF is not a document -- it is a page
+# number and a header from a scan. Mirrors MIN_CONTENT_CHARS on the upload side,
+# which a `.txt` is held to at the door and a `.pdf` cannot be (D51).
+MIN_EXTRACTED_CHARS = 20
+
+
 class NothingToSummarize(Exception):
     """The document held no prose. A real extractor would fail the same way."""
+
+
+class NoTextLayer(Exception):
+    """A valid PDF that is a picture of a document rather than a document.
+
+    Scanned notes are the normal case in a clinic, and they need OCR -- which is
+    declared out of scope. So this is not a crash to be fixed, it is a verdict
+    to be reported: the client is told the file cannot be read *and why*, which
+    is more useful than a summary of the three characters that came out.
+    """
+
+
+def extract_text(job: dict) -> str:
+    """Turn whatever the claim handed over into text to summarize.
+
+    The branch is on `content_type`, which is what the API *verified* the file
+    to be, never what the upload claimed -- so a `.txt` renamed to `.pdf` cannot
+    steer this.
+    """
+    if job["content_type"] != PDF_CONTENT_TYPE:
+        return job["content"]
+
+    raw = b64decode(job["content_base64"])
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(raw))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as exc:
+        # A file that opened as a PDF at the door and falls apart here: the
+        # header was right and the body was not. Only whoever parses it can
+        # know, which is the reason this work is the worker's (D51).
+        raise NothingToSummarize(f"the PDF could not be read: {exc}") from exc
+
+    if len(text.strip()) < MIN_EXTRACTED_CHARS:
+        raise NoTextLayer("the PDF holds no text layer")
+
+    return text
 
 
 def summarize(text: str) -> str:
@@ -119,7 +165,20 @@ async def run_once(client: httpx.AsyncClient) -> bool:
 
     job = claim.json()
     try:
-        verdict = {"status": "DONE", "summary": summarize(job["content"])}
+        verdict = {"status": "DONE", "summary": summarize(extract_text(job))}
+    except NoTextLayer as exc:
+        # Its own code, because it is its own thing: the file is fine and the
+        # document is unreadable. A client can tell the owner "this scan needs
+        # to be re-sent as text", which EXTRACTION_FAILED could not.
+        logger.warning("job %s has no text layer: %s", job["job_id"], exc)
+        verdict = {
+            "status": "FAILED",
+            "error_code": "PDF_HAS_NO_TEXT_LAYER",
+            "message": (
+                f"{job['filename']} appears to be a scanned document with no text layer. "
+                "Reading it would need OCR, which this service does not do."
+            ),
+        }
     except Exception as exc:
         logger.warning("job %s could not be summarized: %s", job["job_id"], exc)
         verdict = {

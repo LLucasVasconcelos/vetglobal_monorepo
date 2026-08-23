@@ -1,10 +1,7 @@
-from typing import Annotated
+from fastapi import APIRouter, File, Response, UploadFile, status
 
-from fastapi import APIRouter, File, Query, Response, UploadFile, status
-
-from app.api.deps import AUTH_401, CurrentPrincipal, Db, ResourceId
+from app.api.deps import AUTH_401, CurrentPrincipal, Db, Limit, Offset, ResourceId
 from app.core.errors import documented_errors
-from app.db.base import PG_INT_MAX
 from app.schemas.document import UploadResponse
 from app.schemas.pet import PetCreate, PetListResponse, PetResponse
 from app.services.documents import upload_document
@@ -13,14 +10,6 @@ from app.services.pets import create_pet, list_pets
 router = APIRouter(tags=["pets"])
 
 DEFAULT_PAGE_SIZE = 50
-MAX_PAGE_SIZE = 200
-
-# A list route with no ceiling is a route that returns the whole table the day
-# the table is big. The cap is on the *parameter*, so asking for more is a 422
-# and not a silently smaller page -- a client that thinks it read everything
-# because it asked for 10000 and got 200 is a client that skips records.
-Limit = Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="Rows per page, at most 200.")]
-Offset = Annotated[int, Query(ge=0, le=PG_INT_MAX, description="Rows to skip.")]
 
 
 @router.post(

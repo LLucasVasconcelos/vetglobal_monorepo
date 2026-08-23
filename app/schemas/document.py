@@ -46,6 +46,24 @@ class DocumentResponse(BaseModel):
     job: JobView | None = None
 
 
+class DocumentListResponse(BaseModel):
+    """A page of the caller's own documents, each with its latest job (D52).
+
+    The job is part of the row and not a second call: "which of these is ready"
+    is the only question a document list exists to answer.
+    """
+
+    items: list[DocumentResponse]
+    total: int = Field(
+        description=(
+            "How many documents match in YOUR clinic — the whole set, not this page. "
+            "Another clinic's documents are not counted."
+        )
+    )
+    limit: int
+    offset: int
+
+
 class PollResponse(BaseModel):
     """Answer to a long poll (D19, D50).
 

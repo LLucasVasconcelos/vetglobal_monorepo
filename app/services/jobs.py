@@ -12,6 +12,7 @@ exactly why `/internal/*` is closed behind a shared secret rather than a JWT
 (D27) -- there is no isolation left here to fall back on.
 """
 
+from base64 import b64encode
 from datetime import timedelta
 
 from sqlalchemy import and_, func, or_, select, update
@@ -22,6 +23,7 @@ from app.core.errors import DomainError
 from app.db.listener import notify_job_finished
 from app.models import Document, Job, JobStatus
 from app.schemas.job import ClaimedJob, CompleteRequest, CompleteResponse
+from app.services.documents import TEXT_CONTENT_TYPE
 
 PROCESSING_TIMEOUT_MESSAGE = (
     "Processing did not finish within the allowed time, after "
@@ -129,14 +131,21 @@ async def claim_next_job(db: AsyncSession) -> ClaimedJob | None:
 
     await db.commit()
 
+    is_text = document.content_type == TEXT_CONTENT_TYPE
+
     return ClaimedJob(
         job_id=claimed.id,
         document_id=claimed.document_id,
         attempt=claimed.attempts,
         filename=document.filename,
-        # Decoding cannot fail: the upload refused anything that was not UTF-8
-        # before the document was ever stored (D25).
-        content=document.content.decode("utf-8"),
+        content_type=document.content_type,
+        # Text goes as text so the loop stays drivable by hand -- reading a
+        # consultation note out of a claim is half of what makes this endpoint
+        # a demonstration. Decoding cannot fail: the upload refused anything
+        # that was not UTF-8 before the document was stored (D25).
+        content=document.content.decode("utf-8") if is_text else None,
+        # A PDF has no readable form in JSON, so it goes as base64 (D51).
+        content_base64=None if is_text else b64encode(document.content).decode("ascii"),
         lease_expires_at=claimed.lease_expires_at,
     )
 

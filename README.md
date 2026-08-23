@@ -6,15 +6,14 @@ A document is uploaded for a pet, a summarization job is queued, a worker
 processes it, and the client follows progress through long polling — without
 holding any per-request state in process memory.
 
-> **Status:** complete and running. Eleven routes, **182 tests** against a real
-> PostgreSQL. Registration, authentication, pets, upload with deduplication,
-> document read, the queue with its `claim` / `complete`, a standalone worker
-> process, and the long poll over `LISTEN/NOTIFY` are all live.
+> **Status:** complete and running. Twelve routes, **211 tests** against a real
+> PostgreSQL. Every functional requirement of the assignment is implemented,
+> `.txt` and `.pdf` alike, along with six of its eight bonus items.
 >
 > **Deliberately not built** — each one explained in
-> [What is not here](#what-is-not-here): `.pdf` input (a requirement, deferred
-> and said so), real summarization, a frontend, OCR, row-level security, cloud
-> storage, deployment, encryption at rest, rate limiting.
+> [What is not here](#what-is-not-here): real summarization, a frontend, OCR,
+> row-level security, cloud storage, deployment, encryption at rest, rate
+> limiting.
 
 **In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
 
@@ -32,7 +31,8 @@ assignment specified.
 | `POST` | `/auth/users` | adds a colleague to the clinic **in your token** |
 | `POST` | `/pets` | |
 | `GET` | `/pets?limit=50&offset=0` | your clinic's pets, and the `total` |
-| `POST` | `/pets/{pet_id}/documents` | `202`, or `200` when the content was already uploaded |
+| `POST` | `/pets/{pet_id}/documents` | `.txt` or `.pdf`; `202`, or `200` when the content was already uploaded |
+| `GET` | `/documents?limit=50&offset=0&pet_id=` | your clinic's documents, each with its latest job |
 | `GET` | `/documents/{document_id}` | metadata and the latest job, with its summary |
 | `GET` | `/documents/{document_id}/poll?after_job_id=0` | held open for 25 seconds |
 | `POST` | `/internal/jobs/claim` | the worker's side — takes one job off the queue |
@@ -60,7 +60,7 @@ TOKEN=$(curl -sX POST localhost:8000/auth/register -H 'Content-Type: application
 curl -sX POST localhost:8000/pets -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"name":"Hank","owner_name":"John"}'
 
-# 3. A document. 202, with everything needed to follow along.
+# 3. A document — .txt or .pdf. 202, with everything needed to follow along.
 curl -sX POST localhost:8000/pets/1/documents -H "Authorization: Bearer $TOKEN" \
   -F 'file=@consultation.txt'
 # {"document_id":1,"job_id":1,"status":"ENQUEUED"}
@@ -111,7 +111,7 @@ an extra moving part to deploy, supervise and explain.
 it reaches whoever is listening at that instant and is otherwise gone. So every
 waiter also re-reads the row every five seconds. That re-read is not a
 belt-and-braces afterthought — it is the reason the whole design is allowed to
-keep waiters in process memory (see [stateless](#9-stateless-and-what-it-cost)).
+keep waiters in process memory (see [stateless](#10-stateless-and-what-it-cost)).
 *Memory makes it fast; the database makes it true.*
 
 **The trap, and the ordering that avoids it.** Subscribe **before** reading. In
@@ -231,7 +231,36 @@ completely idle queue, a dead worker's job stays `PROCESSING` until the next
 claim — a test pins that, so it stays a decision rather than becoming a
 surprise.
 
-### 6. Tenant isolation, and why `404` and not `403`
+### 6. `.pdf`: verified at the door, read by the worker
+
+A `.txt` is verifiable in full on arrival — decode it and you know everything.
+A `.pdf` is only verifiable as *being a PDF*: the first five bytes are `%PDF-`,
+and that is all the route can say without opening the file. Whether it holds
+readable text is a question for whoever parses it.
+
+So the work splits: the route checks the extension, the size and the header and
+stores the bytes; the worker opens it. Extraction is slow and it fails — in the
+route, an upload would stop answering `202` in milliseconds and start holding
+the connection open through a 200-page document, and an unreadable file would
+become an **upload error** when it is really a **job that failed**.
+
+A scanned document — a photograph of a consultation note, which is the normal
+case in a clinic — is a perfectly valid PDF with no text layer. It gets its own
+`error_code`, `PDF_HAS_NO_TEXT_LAYER`, rather than the generic extraction
+failure: with it, a client can tell the owner "send this as text"; without it,
+they only know something went wrong. Reading those would need OCR, which is out
+of scope.
+
+One consequence in the contract: the claim now carries `content_type` plus
+either `content` (text) or `content_base64` (bytes). Two fields where one would
+do, deliberately — the `.txt` path stays readable in the claim, and reading a
+consultation note straight out of the response is half of what makes that
+endpoint a demonstration. The cost is base64's 33%: a 10 MB PDF is 13 MB of
+JSON. A raw-bytes endpoint would avoid it at the price of a second round trip
+between claiming a job and starting it, which is exactly what sending the text
+with the claim was meant to avoid.
+
+### 7. Tenant isolation, and why `404` and not `403`
 
 Every clinic is a tenant. `tenant_id` comes from the **token**, never from a
 body field or a query parameter — so there is nothing in a request to point at
@@ -246,7 +275,7 @@ anyone holding the signing key could mint a token for any `tenant_id` and the
 isolation would obey. The cost is one primary-key lookup on a request that was
 going to hit the database anyway; what it buys is revocation that works *now*.
 
-### 7. Files live in the database, as `bytea`
+### 8. Files live in the database, as `bytea`
 
 The alternative was local disk, and local disk contradicts a requirement the
 assignment itself wrote: stateless with multiple instances. It also brings the
@@ -259,7 +288,7 @@ traffic the answer is object storage with the metadata still in Postgres, and
 the tradeoff would invert around the size where streaming beats transactional
 consistency. For `.txt` clinical notes with a 10 MB ceiling, it does not.
 
-### 8. One error shape, and no 500 for anything predictable
+### 9. One error shape, and no 500 for anything predictable
 
 ```json
 { "status": "FAILED", "error_code": "PROCESSING_TIMEOUT", "message": "…" }
@@ -277,7 +306,7 @@ out of database errors. Tests pin both halves: predictable input never produces
 a `500`, and a genuine crash still answers in the envelope without carrying the
 exception out.
 
-### 9. Stateless, and what it cost
+### 10. Stateless, and what it cost
 
 The requirement is that request handling must not depend on in-memory state that
 would break with multiple instances. Two things here look like they might:
@@ -293,7 +322,7 @@ its own, since a listener that stayed down would silently degrade every poll on
 that instance to the re-read.
 
 **The uploaded file.** Same rule, applied to disk instead of memory: nothing is
-written to local disk, which is what [decision 7](#7-files-live-in-the-database-as-bytea)
+written to local disk, which is what [decision 8](#8-files-live-in-the-database-as-bytea)
 is about.
 
 ---
@@ -305,7 +334,7 @@ Its own list of unspecified details, and what was chosen for each:
 | question | answer |
 |---|---|
 | How should the queue be simulated? | The `jobs` table, claimed with `FOR UPDATE SKIP LOCKED` and a lease. No broker. |
-| How should files be stored? | `bytea` in Postgres — [decision 7](#7-files-live-in-the-database-as-bytea). |
+| How should files be stored? | `bytea` in Postgres — [decision 8](#8-files-live-in-the-database-as-bytea). |
 | How should duplicate uploads be handled? | Deduplicated by `sha256` + `pet_id`; `200` instead of `202`. A failed last job gets a new job. |
 | What if the worker completes the same job twice? | Same verdict: `200`, `applied: false`, silent. Contradicting verdict: `409`. |
 | What should polling return on timeout? | `200` with an envelope carrying the cursor — [decision 3](#3-what-the-poll-returns-on-timeout--a-declared-deviation). |
@@ -322,12 +351,6 @@ on data they created themselves).
 
 ## What is not here
 
-**A requirement, deferred and said so:** `.pdf` upload. The assignment asks for
-`.txt` **or** `.pdf`; only `.txt` is accepted, and anything else is refused with
-`415 UNSUPPORTED_FILE_TYPE` naming the reason. It was ranked last against the
-deadline because the polling and queue behaviour is what the assignment is
-about, and it is the first thing to build next.
-
 **Designed, not built.** The architecture calls for these and their absence is
 the difference between what is designed and what runs:
 
@@ -336,7 +359,7 @@ the difference between what is designed and what runs:
 | a containerized `docker compose up --scale worker=2` | would mean containerizing the API, and there is no `Dockerfile` — that is adjacent to deployment, which is out of scope. Two terminals do the same demonstration, and a test does it unattended |
 | React frontend | none — the API is exercised through `/docs` or `curl`. If one is added it will be a demonstration of the polling loop, not a sample of frontend quality, and it would be said so plainly |
 | observability | `enqueued_at`, `claimed_at` and `finished_at` are recorded per job, so duration is *available*; nothing reports on it |
-| pagination for listing documents | `GET /pets` is paginated with `limit` / `offset` and a `total`; there is no document listing endpoint to paginate |
+| keyset pagination | `GET /pets` and `GET /documents` page with `limit` / `offset` and a `total`. Keyset would be the honest answer for a list that receives inserts between pages — a document uploaded mid-walk makes an offset page repeat or skip a row. What holds it off is scale, not the argument |
 
 **Real summarization.** `summarize()` in `worker.py` takes the opening sentences
 and trims them. The assignment asks for a worker that *simulates* the work, so
@@ -565,7 +588,12 @@ answering on notification and on re-read, a poll timing out, a lease expiring
 with and without attempts left, a stale worker's fencing token, cross-tenant
 reads on every route, the listener reconnecting after its connection is killed,
 two real workers racing for the same queue, a worker losing its lease mid-job,
-and every input that used to arrive as a `500`.
+a scanned PDF failing with a named reason, and every input that used to arrive
+as a `500`.
+
+The `.pdf` fixtures are **built**, not committed as opaque bytes: `tests/pdfs.py`
+writes a minimal valid PDF, with or without a text layer, and the difference
+between those two files is the whole point of the `.pdf` tests.
 
 ## Linting
 

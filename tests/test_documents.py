@@ -5,7 +5,7 @@ from sqlalchemy import func, select, text
 
 from app.core.config import settings
 from app.db.base import PG_INT_MAX
-from app.models import Document, Job
+from app.models import Document, Job, JobStatus
 from tests.conftest import auth
 
 CLINICAL_NOTE = (
@@ -301,8 +301,11 @@ async def test_reupload_of_a_done_document_returns_the_existing_summary(client, 
 @pytest.mark.parametrize(
     ("filename", "content", "status_code", "error_code"),
     [
-        ("scan.pdf", CLINICAL_NOTE, 415, "UNSUPPORTED_FILE_TYPE"),
+        # Named .pdf and holding plain text: the extension is accepted now, so
+        # what refuses it is the header check, not the name (D51).
+        ("scan.pdf", CLINICAL_NOTE, 415, "FILE_CONTENT_MISMATCH"),
         ("notes", CLINICAL_NOTE, 415, "UNSUPPORTED_FILE_TYPE"),
+        ("notes.docx", CLINICAL_NOTE, 415, "UNSUPPORTED_FILE_TYPE"),
         ("notes.txt", b"\xff\xfe\x00\x01binary", 415, "FILE_CONTENT_MISMATCH"),
         ("notes.txt", b"", 422, "FILE_EMPTY_OR_TOO_SHORT"),
         ("notes.txt", b"   \n\t  ", 422, "FILE_EMPTY_OR_TOO_SHORT"),
@@ -508,3 +511,131 @@ async def test_a_real_but_unknown_document_id_is_still_404(client, aurora_token)
 
     assert response.status_code == 404
     assert response.json()["error_code"] == "DOCUMENT_NOT_FOUND"
+
+
+# --- listing documents (D52) ------------------------------------------------
+
+
+async def upload_n(client, token: str, pet_id: int, how_many: int) -> list[int]:
+    """`how_many` distinct documents for one pet, oldest first."""
+    ids = []
+    for n in range(how_many):
+        response = await upload(
+            client, token, pet_id, content=CLINICAL_NOTE + f" Visit {n}.".encode()
+        )
+        ids.append(response.json()["document_id"])
+    return ids
+
+
+async def test_the_list_carries_each_document_with_its_latest_job(client, aurora_token):
+    """The reason a document list exists: *which of these is ready*. Without the
+    job in the row, every item needs a second call to be worth anything."""
+    pet_id = await create_pet(client, aurora_token)
+    document_id = (await upload(client, aurora_token, pet_id)).json()["document_id"]
+
+    listing = await client.get("/documents", headers=auth(aurora_token))
+
+    assert listing.status_code == 200
+    body = listing.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["id"] == document_id
+    assert item["filename"] == "consultation.txt"
+    assert item["job"]["status"] == JobStatus.ENQUEUED
+
+
+async def test_the_list_shows_the_summary_once_a_job_finished(client, aurora_token, db):
+    pet_id = await create_pet(client, aurora_token)
+    upload_response = await upload(client, aurora_token, pet_id)
+    await db.execute(
+        text("UPDATE jobs SET status = 'DONE', summary = :s WHERE document_id = :d"),
+        {"s": "Vomiting, hydrated.", "d": upload_response.json()["document_id"]},
+    )
+    await db.commit()
+
+    listing = await client.get("/documents", headers=auth(aurora_token))
+
+    assert listing.json()["items"][0]["job"]["summary"] == "Vomiting, hydrated."
+
+
+async def test_the_list_never_leaves_the_tenant(client, aurora_token, boreal_token):
+    """The same check `GET /pets` exists for, on the other table (D39)."""
+    mine = await create_pet(client, aurora_token)
+    theirs = await create_pet(client, boreal_token)
+    await upload_n(client, aurora_token, mine, 2)
+    await upload_n(client, boreal_token, theirs, 3)
+
+    ours = (await client.get("/documents", headers=auth(aurora_token))).json()
+    others = (await client.get("/documents", headers=auth(boreal_token))).json()
+
+    assert ours["total"] == 2 and others["total"] == 3
+    assert {item["id"] for item in ours["items"]}.isdisjoint(
+        {item["id"] for item in others["items"]}
+    )
+
+
+async def test_a_clinic_with_no_documents_sees_an_empty_list(client, boreal_token, aurora_token):
+    pet_id = await create_pet(client, aurora_token)
+    await upload(client, aurora_token, pet_id)
+
+    listing = await client.get("/documents", headers=auth(boreal_token))
+
+    assert listing.json() == {"items": [], "total": 0, "limit": 50, "offset": 0}
+
+
+async def test_paging_walks_the_whole_set_without_repeating(client, aurora_token):
+    pet_id = await create_pet(client, aurora_token)
+    created = await upload_n(client, aurora_token, pet_id, 5)
+
+    first = (await client.get("/documents?limit=2", headers=auth(aurora_token))).json()
+    second = (await client.get("/documents?limit=2&offset=2", headers=auth(aurora_token))).json()
+    third = (await client.get("/documents?limit=2&offset=4", headers=auth(aurora_token))).json()
+
+    seen = [item["id"] for page in (first, second, third) for item in page["items"]]
+    assert seen == sorted(created, reverse=True), "newest first, every row once"
+    assert first["total"] == 5, "total is the whole set, not the page"
+
+
+async def test_the_pet_filter_narrows_and_cannot_widen(client, aurora_token, boreal_token):
+    """`pet_id` is a filter on top of the tenant filter, never instead of it."""
+    mine = await create_pet(client, aurora_token)
+    other_of_mine = await create_pet(client, aurora_token)
+    theirs = await create_pet(client, boreal_token)
+    await upload_n(client, aurora_token, mine, 2)
+    await upload(client, aurora_token, other_of_mine)
+    await upload_n(client, boreal_token, theirs, 3)
+
+    narrowed = (await client.get(f"/documents?pet_id={mine}", headers=auth(aurora_token))).json()
+    reaching = (await client.get(f"/documents?pet_id={theirs}", headers=auth(aurora_token))).json()
+
+    assert narrowed["total"] == 2
+    assert all(item["pet_id"] == mine for item in narrowed["items"])
+    assert reaching == {"items": [], "total": 0, "limit": 50, "offset": 0}
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["limit=0", "limit=201", "limit=-1", "offset=-1", "pet_id=0", f"pet_id={PG_INT_MAX + 1}"],
+    ids=["zero", "over-max", "negative", "negative-offset", "pet-zero", "pet-over-int4"],
+)
+async def test_a_page_that_cannot_exist_is_422_here_too(client, aurora_token, query):
+    response = await client.get(f"/documents?{query}", headers=auth(aurora_token))
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
+async def test_listing_documents_without_a_token_is_401(client):
+    assert (await client.get("/documents")).status_code == 401
+
+
+async def test_the_list_does_not_carry_the_files(client, aurora_token):
+    """Metadata only. A page of 50 documents that each dragged their bytes along
+    would be half a gigabyte read out of Postgres to answer a listing (D52)."""
+    pet_id = await create_pet(client, aurora_token)
+    await upload(client, aurora_token, pet_id)
+
+    item = (await client.get("/documents", headers=auth(aurora_token))).json()["items"][0]
+
+    assert "content" not in item
+    assert item["size_bytes"] == len(CLINICAL_NOTE)

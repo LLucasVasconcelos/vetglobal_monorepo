@@ -25,7 +25,23 @@ class ClaimedJob(BaseModel):
         )
     )
     filename: str
-    content: str
+    content_type: str = Field(
+        description=(
+            "What the file was verified to be, not what the upload declared. It says which "
+            "of the two fields below is filled in."
+        )
+    )
+    content: str | None = Field(
+        default=None,
+        description="The text itself, for `text/plain`. Null for anything binary.",
+    )
+    content_base64: str | None = Field(
+        default=None,
+        description=(
+            "The raw bytes, base64-encoded, for a format that has no readable form in JSON "
+            "— today that means `application/pdf`. Null for text."
+        ),
+    )
     lease_expires_at: datetime = Field(
         description=(
             "Finish before this instant. Past it the job is reclaimed by another "
