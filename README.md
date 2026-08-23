@@ -394,6 +394,14 @@ row-level security (described as the stronger mitigation for tenant isolation,
 not implemented); cloud storage; deployment; encryption at rest; and rate
 limiting on any route.
 
+**Open registration is a demo affordance, not a product decision.** Anyone can
+create a clinic with one call, and that exists for a single reason: whoever
+reviews this clones the repository and needs a token immediately, without
+hunting for seeded credentials. A real clinical system would gate this behind an
+invitation or a contract, with the address verified before the tenant exists.
+It is the first route to close, and closing it changes nothing underneath —
+tenant isolation does not depend on who is allowed to create a tenant.
+
 **Known limitations, stated rather than discovered.** The `413` for an oversized
 upload happens *after* the whole file has been received, since there is no global
 body limit. There is no rate limiting anywhere, which matters more with open
