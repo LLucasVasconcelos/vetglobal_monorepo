@@ -3,18 +3,339 @@
 Asynchronous clinical document summarization API.
 
 A document is uploaded for a pet, a summarization job is queued, a worker
-processes it, and the frontend follows progress through long polling —
-without holding any per-request state in process memory.
+processes it, and the client follows progress through long polling — without
+holding any per-request state in process memory.
 
-> **Status:** the synchronous half is done and the queue runs. Registration,
-> authentication, pets, upload with deduplication, document read, and the
-> worker's `claim` / `complete` are all live — ten routes, 136 tests against a
-> real PostgreSQL.
+> **Status:** complete and running. Eleven routes, **163 tests** against a real
+> PostgreSQL. Registration, authentication, pets, upload with deduplication,
+> document read, the worker's `claim` / `complete`, and the long poll over
+> `LISTEN/NOTIFY` are all live.
 >
-> **Not there yet:** the long poll (`GET /documents/{id}/poll`), the standalone
-> worker process, and `.pdf` input. Deliberately out of scope, and stated as
-> such: OCR, row-level security, cloud storage, deployment, encryption at rest
-> and rate limiting.
+> **Deliberately not built** — each one explained in
+> [What is not here](#what-is-not-here): `.pdf` input (a requirement, deferred
+> and said so), a standalone worker process, a frontend, OCR, row-level
+> security, cloud storage, deployment, encryption at rest, rate limiting.
+
+**In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
+
+---
+
+## The API
+
+Routes are at the root, without a `/api/v1` prefix, because that is what the
+assignment specified.
+
+| method | route | |
+|---|---|---|
+| `POST` | `/auth/register` | creates a clinic and your account in it, returns a JWT |
+| `POST` | `/auth/login` | |
+| `POST` | `/auth/users` | adds a colleague to the clinic **in your token** |
+| `POST` | `/pets` | |
+| `GET` | `/pets?limit=50&offset=0` | your clinic's pets, and the `total` |
+| `POST` | `/pets/{pet_id}/documents` | `202`, or `200` when the content was already uploaded |
+| `GET` | `/documents/{document_id}` | metadata and the latest job, with its summary |
+| `GET` | `/documents/{document_id}/poll?after_job_id=0` | held open for 25 seconds |
+| `POST` | `/internal/jobs/claim` | the worker's side — takes one job off the queue |
+| `POST` | `/internal/jobs/{job_id}/complete` | the worker's result |
+| `GET` | `/health` | answers without touching the database |
+
+Job states: `ENQUEUED → PROCESSING → DONE | FAILED`.
+
+The `/internal/*` routes take an `X-Internal-Token` header instead of the JWT.
+They exist as HTTP routes on purpose: with no worker process yet, this is what
+makes the queue loop demonstrable by hand — and being able to play the worker in
+one terminal while a poll waits in another is the fastest way to see the design
+work.
+
+### The walkthrough
+
+```bash
+# 1. A clinic and an account in it. Nothing to seed; register and you are in.
+TOKEN=$(curl -sX POST localhost:8000/auth/register -H 'Content-Type: application/json' \
+  -d '{"tenant_name":"Clinica Aurora","email":"vet@aurora.example.com","password":"Vetglobal#2026"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+# 2. A pet. The clinic comes from the token — there is no field for it here.
+curl -sX POST localhost:8000/pets -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"Hank","owner_name":"John"}'
+
+# 3. A document. 202, with everything needed to follow along.
+curl -sX POST localhost:8000/pets/1/documents -H "Authorization: Bearer $TOKEN" \
+  -F 'file=@consultation.txt'
+# {"document_id":1,"job_id":1,"status":"ENQUEUED"}
+
+# 4. Start waiting BEFORE any work happens. This blocks.
+curl -s "localhost:8000/documents/1/poll?after_job_id=0" -H "Authorization: Bearer $TOKEN"
+
+# 5. In another terminal, play the worker.
+curl -sX POST localhost:8000/internal/jobs/claim -H "X-Internal-Token: $INTERNAL_TOKEN"
+curl -sX POST localhost:8000/internal/jobs/1/complete -H "X-Internal-Token: $INTERNAL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"DONE","summary":"Intermittent vomiting for five days.","attempt":1}'
+```
+
+Step 4 answers about a millisecond after step 5 lands. Everything above is also
+clickable at <http://127.0.0.1:8000/docs>.
+
+---
+
+## Design decisions and tradeoffs
+
+### 1. Long polling: PostgreSQL is the broker
+
+`complete` emits `NOTIFY`; each API instance holds **one** dedicated connection
+in `LISTEN document_events` and fans the event out in memory to the polls parked
+on that instance.
+
+```
+GET /documents/10/poll?after_job_id=0
+ 1. subscribe to document 10          ← before anything is read
+ 2. SELECT the job                    ← already finished? answer now
+ 3. wait: the notification (~1 ms), or a re-read every 5s, or 25s expire
+
+POST /internal/jobs/55/complete
+ └─ BEGIN
+    UPDATE jobs SET status='DONE' ... WHERE id=55 AND status='PROCESSING'
+    SELECT pg_notify('document_events', '{"document_id":10,...}')
+    COMMIT ──► Postgres releases the notification here
+```
+
+**Why this and not a poll loop:** it is a bonus point the assignment names, it
+gives ~1 ms latency instead of a query every second per pending client, and the
+queue already lives in Postgres — adding Redis to deliver one boolean would be
+an extra moving part to deploy, supervise and explain.
+
+**What makes it correct and not merely fast.** `NOTIFY` is **not persistent**:
+it reaches whoever is listening at that instant and is otherwise gone. So every
+waiter also re-reads the row every five seconds. That re-read is not a
+belt-and-braces afterthought — it is the reason the whole design is allowed to
+keep waiters in process memory (see [stateless](#9-stateless-and-what-it-cost)).
+*Memory makes it fast; the database makes it true.*
+
+**The trap, and the ordering that avoids it.** Subscribe **before** reading. In
+the other order, a job that finishes in between emits its notification with
+nobody listening: the read already said `PROCESSING`, the event is gone, and the
+client waits the full 25 seconds for something that already happened. There is a
+test that completes a job in exactly that window
+(`test_a_job_finishing_between_the_read_and_the_wait_is_not_missed`), and it was
+checked against a deliberately inverted implementation to confirm it fails
+there. Several poll tests also push the re-read interval past the poll's own
+timeout, so that **only** a notification can answer them — at the default five
+seconds, a broken `NOTIFY` would still go green, five seconds late.
+
+**The notification is emitted inside the transaction that closes the job**, not
+after the commit. Postgres holds it until `COMMIT`, so a listener is never woken
+for a row it cannot read yet, and a commit that fails announces nothing. Emitted
+afterwards in a second transaction, both windows open: a wake-up racing its own
+data, and a committed job whose announcement was lost with the next line of
+code.
+
+**The payload is not the answer.** It carries `{document_id, job_id, status}`,
+but a woken poll re-reads the row; only `document_id` is used, to know whom to
+wake. A notification can be delivered twice, out of order, or be about a job
+this client is not waiting for — trusting it would put correctness in the
+message instead of in the database.
+
+### 2. Two timeouts that are not the same thing
+
+This distinction is the one most likely to be got wrong by a client, so the API
+is shaped to make confusing them hard.
+
+| | poll timeout | job lease |
+|---|---|---|
+| what ran out | this HTTP request (25s) | the processing itself (60s per attempt, 3 attempts) |
+| the job is | alive, still working | over |
+| the answer | `200` with `timed_out: true` | `200` with `result.status: FAILED`, `error_code: PROCESSING_TIMEOUT` |
+| the client should | ask again | show the failure |
+
+Treating the first as the second makes the UI announce an error on a document
+that is about to be ready.
+
+### 3. What the poll returns on timeout — a declared deviation
+
+The assignment offered `204 No Content` or `200 null`. This is a third option,
+so it needs justifying:
+
+```json
+{ "result": null, "awaiting_job_id": 55, "timed_out": true }
+```
+
+`204` has nowhere to carry the cursor, and a bare `null` cannot distinguish
+"not yet" from "finished, and empty". This envelope answers both and hands back
+what to call again with, so the client keeps no state between requests. The same
+shape comes back on success, with `result` filled in.
+
+`after_job_id=0` — the value in the assignment's own example, where no job `0`
+exists — means *the latest job of this document*, resolved server-side. The
+answer always names the id it resolved to. A client that kept its `job_id` from
+the upload should send it: `0` is a convenience, not the main path.
+
+### 4. Idempotency, in both places it matters
+
+**Upload.** Deduplicated by `sha256` of the content plus `pet_id`. The same file
+twice answers `200` with the existing `document_id` instead of `202`, and no
+second job is created. The exception is a document whose last job **failed** —
+re-uploading is how a client asks to try again, and it gets a *new* job rather
+than a rewritten one, so the failed attempt stays readable. The unique index on
+`(pet_id, sha256)` is what settles two simultaneous uploads of the same bytes;
+the loser reads back the winner's row.
+
+**Completion.** At-least-once delivery *guarantees* a worker will sometimes
+report the same job twice, so a repeat must be silent: same verdict again is
+`200` with `applied: false`, and nothing is written. But `FAILED` over a job
+already `DONE` is not a retry, it is a bug — that answers `409`, because
+swallowing it would let an error replace a summary.
+
+### 5. Queue semantics without a queue
+
+The `jobs` table *is* the queue. Every state change is a race with another
+worker, so each one is a **single conditional `UPDATE`** with the check in the
+`WHERE`, never a `SELECT` followed by an `UPDATE` — there is no window between
+deciding and doing.
+
+```sql
+UPDATE jobs SET status='PROCESSING', attempts=attempts+1, ...
+ WHERE id = (SELECT id FROM jobs WHERE status='ENQUEUED'
+             ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
+```
+
+`SKIP LOCKED` is what makes it a queue rather than a table two workers fight
+over: a row someone else is claiming is stepped over instead of waited on, so N
+workers make N different claims at the same instant.
+
+**The lease** is what makes a dead worker recoverable. A claim comes with a
+deadline; a job still `PROCESSING` past it is available again, and fails with
+`PROCESSING_TIMEOUT` once its attempts are spent. `attempt` is a fencing token —
+a worker that stalled past its lease and reports late is told `409
+JOB_LEASE_LOST`, because it is writing about work somebody else already redid.
+
+**Assumed cost:** expired leases are swept **inside the claim**, not by a
+background sweeper. The queue is only read by workers, so a stuck job matters
+exactly when somebody comes looking for work. The price is that with a
+completely idle queue, a dead worker's job stays `PROCESSING` until the next
+claim — a test pins that, so it stays a decision rather than becoming a
+surprise.
+
+### 6. Tenant isolation, and why `404` and not `403`
+
+Every clinic is a tenant. `tenant_id` comes from the **token**, never from a
+body field or a query parameter — so there is nothing in a request to point at
+another clinic. A resource belonging to someone else answers `404`: ids are
+sequential, `GET /documents/41` is a guess anyone can make, and `403` would
+confirm the guess was right, which is itself the leak.
+
+**The token is a claim, not the answer.** Each authenticated request reads the
+user row and builds the principal from *it*, not from the JWT payload. Without
+that, a deleted account keeps reading records until its token expires, and
+anyone holding the signing key could mint a token for any `tenant_id` and the
+isolation would obey. The cost is one primary-key lookup on a request that was
+going to hit the database anyway; what it buys is revocation that works *now*.
+
+### 7. Files live in the database, as `bytea`
+
+The alternative was local disk, and local disk contradicts a requirement the
+assignment itself wrote: stateless with multiple instances. It also brings the
+orphan problem — either the transaction rolls back and the file is left behind,
+or the row commits and the write failed. In the database, bytes and metadata
+commit together, and the `sha256` cannot drift from the content it describes.
+
+**Assumed cost:** this does not scale to large files or high volume. With real
+traffic the answer is object storage with the metadata still in Postgres, and
+the tradeoff would invert around the size where streaming beats transactional
+consistency. For `.txt` clinical notes with a 10 MB ceiling, it does not.
+
+### 8. One error shape, and no 500 for anything predictable
+
+```json
+{ "status": "FAILED", "error_code": "PROCESSING_TIMEOUT", "message": "…" }
+```
+
+`error_code` is stable and for branching on; `message` is for a person and may
+be reworded. Every failure leaves this way — including the ones FastAPI would
+otherwise answer itself, like a validation error or an unknown path, which would
+be a second error format.
+
+A `500` means a bug on our side, and it is the one answer the client gets no
+explanation for: the explanation is the leak — table names, file paths, and in
+one real case the clinical record itself, which is why bound parameters are kept
+out of database errors. Tests pin both halves: predictable input never produces
+a `500`, and a genuine crash still answers in the envelope without carrying the
+exception out.
+
+### 9. Stateless, and what it cost
+
+The requirement is that request handling must not depend on in-memory state that
+would break with multiple instances. Two things here look like they might:
+
+**The waiters.** Each instance keeps its own set of parked polls in memory. It
+does not break the requirement, because correctness never depends on it: every
+waiter re-reads the database on a timer, and `NOTIFY` reaches *every* listening
+instance, not just the one that closed the job. There is a test that closes a
+job and announces it from an entirely separate connection — the shape of a
+second instance — and the waiter in this process wakes anyway. Another kills the
+listener's backend with `pg_terminate_backend` to check that it reconnects on
+its own, since a listener that stayed down would silently degrade every poll on
+that instance to the re-read.
+
+**The uploaded file.** Same rule, applied to disk instead of memory: nothing is
+written to local disk, which is what [decision 7](#7-files-live-in-the-database-as-bytea)
+is about.
+
+---
+
+## The ambiguity the assignment left open
+
+Its own list of unspecified details, and what was chosen for each:
+
+| question | answer |
+|---|---|
+| How should the queue be simulated? | The `jobs` table, claimed with `FOR UPDATE SKIP LOCKED` and a lease. No broker. |
+| How should files be stored? | `bytea` in Postgres — [decision 7](#7-files-live-in-the-database-as-bytea). |
+| How should duplicate uploads be handled? | Deduplicated by `sha256` + `pet_id`; `200` instead of `202`. A failed last job gets a new job. |
+| What if the worker completes the same job twice? | Same verdict: `200`, `applied: false`, silent. Contradicting verdict: `409`. |
+| What should polling return on timeout? | `200` with an envelope carrying the cursor — [decision 3](#3-what-the-poll-returns-on-timeout--a-declared-deviation). |
+| How should tenant isolation be modeled? | One schema, `tenant_id` on every row, taken from the token only. |
+| What if the document does not exist? | `404` — the same answer as a document belonging to someone else, deliberately. |
+
+Two questions the assignment did not ask, answered anyway because the code could
+not proceed without them: what `after_job_id=0` means when job `0` cannot exist,
+and how a first account is created when there is nothing to seed (open
+registration, which also makes tenant isolation something a reviewer can verify
+on data they created themselves).
+
+---
+
+## What is not here
+
+**A requirement, deferred and said so:** `.pdf` upload. The assignment asks for
+`.txt` **or** `.pdf`; only `.txt` is accepted, and anything else is refused with
+`415 UNSUPPORTED_FILE_TYPE` naming the reason. It was ranked last against the
+deadline because the polling and queue behaviour is what the assignment is
+about, and it is the first thing to build next.
+
+**Designed, not built.** The architecture calls for these and their absence is
+the difference between what is designed and what runs:
+
+| | today |
+|---|---|
+| standalone `worker.py` process | the `claim → summarize → complete` loop is driven by hand over HTTP, which is what makes it demonstrable with `curl` |
+| React frontend | none — the API is exercised through `/docs` or `curl`. If one is added it will be a demonstration of the polling loop, not a sample of frontend quality, and it would be said so plainly |
+| observability | `enqueued_at`, `claimed_at` and `finished_at` are recorded per job, so duration is *available*; nothing reports on it |
+| pagination for listing documents | `GET /pets` is paginated with `limit` / `offset` and a `total`; there is no document listing endpoint to paginate |
+
+**Out of scope by decision**, not by omission: OCR for scanned documents;
+row-level security (described as the stronger mitigation for tenant isolation,
+not implemented); cloud storage; deployment; encryption at rest; and rate
+limiting on any route.
+
+**Known limitations, stated rather than discovered.** The `413` for an oversized
+upload happens *after* the whole file has been received, since there is no global
+body limit. There is no rate limiting anywhere, which matters more with open
+registration — doing it properly means Redis or a table, because a counter in
+process memory is worth nothing with two instances, and that is the same
+constraint the polling design is built around. Filenames are stored exactly as
+uploaded, including markup; inert today, and it matters the day something
+renders them without escaping.
 
 ---
 
@@ -103,7 +424,9 @@ A **single `.env` feeds both sides**: Docker Compose substitutes the variables
 when starting Postgres, and the application reads the same names through
 `pydantic-settings`. There are no default values in `docker-compose.yml` on
 purpose — a missing variable fails loudly instead of silently starting the
-database with credentials the application does not have.
+database with credentials the application does not have. The three secrets have
+no default in the application either: it refuses to start without them, because
+a signed token is only worth the secrecy of its key.
 
 `.env` is git-ignored. Only `.env.example` is committed.
 
@@ -170,13 +493,19 @@ uv run pytest -q
 ```
 
 The suite runs against a real PostgreSQL, not a stub — `SKIP LOCKED`, a unique
-index and `NOTIFY` have no meaningful behaviour anywhere else.
+index and `NOTIFY` have no meaningful behaviour anywhere else. It creates and
+migrates **its own database**, `vetglobal_test`, on first run, so nothing you
+register or upload by hand is ever touched: the tests need to truncate freely
+between cases, and a suite that truncates the database you are also using
+destroys your work. Override the name with `TEST_DB_NAME` if it collides.
 
-It creates and migrates **its own database**, `vetglobal_test`, on first run.
-Nothing you register or upload by hand is ever touched: the tests need to
-truncate freely between cases, and a suite that truncates the database you are
-also using by hand destroys your work. Override the name with `TEST_DB_NAME` if
-it collides with something.
+What it covers, beyond the happy path: deduplication and retry after failure,
+double completion and contradicting completion, two simultaneous claims taking
+different jobs, two simultaneous completions applying exactly once, a poll
+answering on notification and on re-read, a poll timing out, a lease expiring
+with and without attempts left, a stale worker's fencing token, cross-tenant
+reads on every route, the listener reconnecting after its connection is killed,
+and every input that used to arrive as a `500`.
 
 ## Linting
 
@@ -219,26 +548,33 @@ Those only take effect when the volume is first created. Recreate it:
 docker compose down -v && docker compose up -d
 ```
 
+**A poll always takes about five seconds to answer**
+The notification is not arriving, and the re-read is doing all the work. The
+listener logs `listening on document_events` at startup; if it does not, check
+that the application can reach the database at all.
+
 ---
 
 ## Project layout
 
 ```
 app/
-  main.py       FastAPI application
+  main.py       FastAPI application, and the lifespan that raises the listener
   core/         settings, error handling, security
-  db/           engine and session
+  db/
+    session.py  engine and pooled sessions
+    listener.py the dedicated LISTEN/NOTIFY connection, outside the pool
   models/       SQLAlchemy models
   schemas/      Pydantic request/response models
-  services/     business logic — routes never touch the database directly
-  api/          route handlers
+  services/
+    poll.py     subscribe → read → wait
+    ...         the rest of the business logic
+  api/          route handlers — these never touch the database directly
 migrations/     Alembic migrations
 tests/
 ```
 
-Two files the architecture calls for and that do not exist yet — listed here
-because their absence is the difference between what is designed and what is
-built: `app/db/listener.py`, the dedicated `LISTEN/NOTIFY` connection the long
-poll needs, and `worker.py`, the separate process that will drive
-`claim → summarize → complete`. Today that loop is driven by hand over HTTP,
-which is what makes it demonstrable with `curl`.
+One file the architecture calls for and that does not exist yet: `worker.py`,
+the separate process that would drive `claim → summarize → complete`. Today that
+loop is driven by hand over HTTP, which is what makes it demonstrable with
+`curl`.
