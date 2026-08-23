@@ -6,15 +6,15 @@ A document is uploaded for a pet, a summarization job is queued, a worker
 processes it, and the client follows progress through long polling — without
 holding any per-request state in process memory.
 
-> **Status:** complete and running. Eleven routes, **163 tests** against a real
+> **Status:** complete and running. Eleven routes, **177 tests** against a real
 > PostgreSQL. Registration, authentication, pets, upload with deduplication,
-> document read, the worker's `claim` / `complete`, and the long poll over
-> `LISTEN/NOTIFY` are all live.
+> document read, the queue with its `claim` / `complete`, a standalone worker
+> process, and the long poll over `LISTEN/NOTIFY` are all live.
 >
 > **Deliberately not built** — each one explained in
 > [What is not here](#what-is-not-here): `.pdf` input (a requirement, deferred
-> and said so), a standalone worker process, a frontend, OCR, row-level
-> security, cloud storage, deployment, encryption at rest, rate limiting.
+> and said so), real summarization, a frontend, OCR, row-level security, cloud
+> storage, deployment, encryption at rest, rate limiting.
 
 **In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
 
@@ -318,10 +318,18 @@ the difference between what is designed and what runs:
 
 | | today |
 |---|---|
-| standalone `worker.py` process | the `claim → summarize → complete` loop is driven by hand over HTTP, which is what makes it demonstrable with `curl` |
+| a containerized `docker compose up --scale worker=2` | would mean containerizing the API, and there is no `Dockerfile` — that is adjacent to deployment, which is out of scope. Two terminals do the same demonstration, and a test does it unattended |
 | React frontend | none — the API is exercised through `/docs` or `curl`. If one is added it will be a demonstration of the polling loop, not a sample of frontend quality, and it would be said so plainly |
 | observability | `enqueued_at`, `claimed_at` and `finished_at` are recorded per job, so duration is *available*; nothing reports on it |
 | pagination for listing documents | `GET /pets` is paginated with `limit` / `offset` and a `total`; there is no document listing endpoint to paginate |
+
+**Real summarization.** `summarize()` in `worker.py` takes the opening sentences
+and trims them. The assignment asks for a worker that *simulates* the work, so
+the exercise is the job lifecycle rather than the quality of the summary. A real
+model would go behind that one function and nothing in the loop would change —
+what would change is everything around it: an API key, a per-job cost, a latency
+that makes the 60 second lease too short, and a clinical record leaving the
+machine.
 
 **Out of scope by decision**, not by omission: OCR for scanned documents;
 row-level security (described as the stronger mitigation for tenant isolation,
@@ -486,6 +494,42 @@ uv run uvicorn app.main:app --reload
 - Interactive docs: <http://127.0.0.1:8000/docs>
 - Health check: <http://127.0.0.1:8000/health>
 
+In **Authorize** there are two keys, and they are not interchangeable:
+`HTTPBearer` takes the JWT from register or login and opens the client routes;
+`APIKeyHeader` takes the `INTERNAL_TOKEN` from your `.env` and opens the two
+`/internal/*` worker routes. No endpoint hands the second one out — it is a
+shared secret, and a route that returned it would be the route that makes it
+pointless.
+
+### The worker
+
+```bash
+uv run python worker.py
+```
+
+A separate process that loops `claim → summarize → complete`. It is a **client**
+of the API: it imports nothing from `app/`, holds no database credentials and no
+signing key, and reaches the queue only through the two routes any other client
+could call. Killing it is safe — the job it was holding returns to the queue
+when its lease expires, and the next worker takes it as `attempt: 2`.
+
+Point it somewhere else with `API_BASE_URL`:
+
+```bash
+API_BASE_URL=http://192.168.1.10:8000 uv run python worker.py
+```
+
+**Run two of them, in two terminals, against a queue holding two jobs** and they
+claim different jobs at the same instant instead of one waiting behind the
+other. That is `SKIP LOCKED`, and it is the reason the queue is a table rather
+than a table two workers fight over. Kill one mid-job and the lease hands its
+work to the other.
+
+Nothing requires the worker to be running: `/internal/jobs/claim` and
+`/internal/jobs/{id}/complete` are the same two routes it calls, so the loop can
+be driven by hand from Swagger or `curl` — which is what the assignment asked
+for when it said the completion endpoint simulates a worker callback.
+
 ## Tests
 
 ```bash
@@ -505,6 +549,7 @@ different jobs, two simultaneous completions applying exactly once, a poll
 answering on notification and on re-read, a poll timing out, a lease expiring
 with and without attempts left, a stale worker's fencing token, cross-tenant
 reads on every route, the listener reconnecting after its connection is killed,
+two real workers racing for the same queue, a worker losing its lease mid-job,
 and every input that used to arrive as a `500`.
 
 ## Linting
@@ -570,11 +615,19 @@ app/
     poll.py     subscribe → read → wait
     ...         the rest of the business logic
   api/          route handlers — these never touch the database directly
+worker.py       the separate process, outside app/ on purpose
 migrations/     Alembic migrations
 tests/
 ```
 
-One file the architecture calls for and that does not exist yet: `worker.py`,
-the separate process that would drive `claim → summarize → complete`. Today that
-loop is driven by hand over HTTP, which is what makes it demonstrable with
-`curl`.
+`worker.py` sits **outside** `app/` and imports nothing from it. That is the
+point rather than tidiness: the service boundary is only real if crossing it
+costs an HTTP request. A worker inside `app/`, importing a session and updating
+the table directly, would be the API under another filename — and nothing would
+stop the next person from importing a service "just to avoid repeating code",
+which is how boundaries disappear.
+
+It also means the worker needs no `JWT_SECRET` and no `DB_PASSWORD`. Importing
+the API's settings would have demanded both, so a process that only speaks HTTP
+would refuse to start without secrets it never uses — and a worker that cannot
+read the database cannot bypass tenant isolation either.

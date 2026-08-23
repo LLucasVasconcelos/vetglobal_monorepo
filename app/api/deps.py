@@ -2,8 +2,8 @@
 
 from typing import Annotated
 
-from fastapi import Depends, Header, Path, Query
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, Path, Query
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import DomainError
@@ -38,11 +38,29 @@ async def get_current_principal(
     return await resolve_principal(db, decode_access_token(credentials.credentials))
 
 
+# Declared as a security scheme and not as a plain `Header()`, so it appears in
+# Swagger's **Authorize** dialog next to the JWT. As a header parameter it was
+# still sendable, but only by retyping it into a box on every single route --
+# and the worker endpoints exist precisely so that somebody can drive the queue
+# by hand and watch a poll answer. A demonstration nobody can run is not one.
+#
+# `auto_error=False` for the same reason as the bearer above: left to itself it
+# answers 403 in a second error format (D22).
+_internal_key = APIKeyHeader(
+    name="X-Internal-Token",
+    auto_error=False,
+    description=(
+        "Shared secret for the worker routes. It is the `INTERNAL_TOKEN` in your `.env` — "
+        "no endpoint hands it out, on purpose (D27)."
+    ),
+)
+
+
 async def require_internal_token(
-    x_internal_token: Annotated[str | None, Header()] = None,
+    token: Annotated[str | None, Depends(_internal_key)] = None,
 ) -> None:
     """Guards `/internal/*`, which can mark any job as done with any text (D27)."""
-    if x_internal_token is None or not internal_token_is_valid(x_internal_token):
+    if token is None or not internal_token_is_valid(token):
         raise DomainError(401, "INVALID_INTERNAL_TOKEN", "Invalid or missing X-Internal-Token.")
 
 
