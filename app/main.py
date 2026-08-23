@@ -1,7 +1,11 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.api import auth, documents, internal, pets
 from app.core.errors import register_error_handlers
+from app.db.listener import document_events
 
 DESCRIPTION = """
 Upload a clinical document, a worker summarizes it, the client follows along by
@@ -80,11 +84,27 @@ TAGS = [
     {"name": "health", "description": "Liveness. The one route that touches nothing."},
 ]
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Raises and lowers this instance's one `LISTEN` connection (D13).
+
+    It comes up in the background and never blocks the boot: a database that is
+    not up yet costs the first polls their wake-up, not the process. Which is
+    the same reason `/health` answers without touching Postgres.
+    """
+    await document_events.start()
+    try:
+        yield
+    finally:
+        await document_events.stop()
+
+
 app = FastAPI(
     title="VetGlobal Backend",
     description=DESCRIPTION,
     version="0.1.0",
     openapi_tags=TAGS,
+    lifespan=lifespan,
 )
 
 register_error_handlers(app)

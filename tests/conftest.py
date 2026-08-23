@@ -136,10 +136,20 @@ async def db():
 
 
 @pytest.fixture(scope="session")
-async def client():
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+async def client(database):
+    """The app, driven in-process, with its lifespan actually running.
+
+    `ASGITransport` speaks to the application directly and does **not** run
+    startup or shutdown on its own -- so without the block below the `LISTEN`
+    connection of D13 would never open, and every long poll test would be
+    measuring the 5-second recheck while quietly reporting that `NOTIFY` works.
+
+    It depends on `database` so the listener connects to a database that exists.
+    """
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
 
 
 async def register(client: AsyncClient, clinic: str, email: str) -> dict:

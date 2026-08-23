@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.errors import DomainError
+from app.db.listener import notify_job_finished
 from app.models import Document, Job, JobStatus
 from app.schemas.job import ClaimedJob, CompleteRequest, CompleteResponse
 
@@ -35,22 +36,35 @@ async def _fail_exhausted_leases(db: AsyncSession) -> None:
     read by workers, so a job stuck in `PROCESSING` matters exactly when
     somebody comes looking for work. One extra indexed `UPDATE` per claim buys
     us no second moving part to deploy, supervise and explain.
+
+    This is the second place a job reaches a terminal state, so it announces it
+    too (D43). Without the `NOTIFY` a poll open on the job that just ran out of
+    attempts would only learn about it on its next recheck -- correct, but
+    seconds late, and for the one outcome the client is least happy to wait for.
     """
-    await db.execute(
-        update(Job)
-        .where(
-            Job.status == JobStatus.PROCESSING,
-            Job.lease_expires_at < func.now(),
-            Job.attempts >= settings.job_max_attempts,
+    failed = (
+        await db.execute(
+            update(Job)
+            .where(
+                Job.status == JobStatus.PROCESSING,
+                Job.lease_expires_at < func.now(),
+                Job.attempts >= settings.job_max_attempts,
+            )
+            .values(
+                status=JobStatus.FAILED,
+                error_code="PROCESSING_TIMEOUT",
+                message=PROCESSING_TIMEOUT_MESSAGE,
+                finished_at=func.now(),
+                lease_expires_at=None,
+            )
+            .returning(Job.id, Job.document_id)
         )
-        .values(
-            status=JobStatus.FAILED,
-            error_code="PROCESSING_TIMEOUT",
-            message=PROCESSING_TIMEOUT_MESSAGE,
-            finished_at=func.now(),
-            lease_expires_at=None,
+    ).all()
+
+    for job in failed:
+        await notify_job_finished(
+            db, document_id=job.document_id, job_id=job.id, status=JobStatus.FAILED.value
         )
-    )
 
 
 async def claim_next_job(db: AsyncSession) -> ClaimedJob | None:
@@ -160,6 +174,17 @@ async def complete_job(db: AsyncSession, job_id: int, data: CompleteRequest) -> 
     ).scalar_one_or_none()
 
     if updated is not None:
+        # The only place a job is closed by a worker, so the only place the
+        # poll has to be woken from (D13). Before the commit, not after: the
+        # notification is queued by Postgres and delivered *at* the commit, so
+        # it cannot arrive ahead of the row it describes, and a failed commit
+        # takes the announcement down with it.
+        await notify_job_finished(
+            db,
+            document_id=updated.document_id,
+            job_id=updated.id,
+            status=updated.status.value,
+        )
         await db.commit()
         return _view(updated, applied=True)
 

@@ -534,3 +534,32 @@ async def test_reuploading_after_a_failure_creates_a_claimable_job(client, auror
     assert claim.status_code == 200
     assert claim.json()["job_id"] == retry.json()["job_id"]
     assert claim.json()["attempt"] == 1, "a new job starts its own count"
+
+
+async def test_an_exhausted_lease_is_only_noticed_when_somebody_claims(client, aurora_token, db):
+    """The cost of having no sweeper, pinned so it is a decision and not a
+    surprise (D21).
+
+    The sweep runs inside the claim, because the queue is only ever read by
+    workers: a job stuck in `PROCESSING` matters exactly when somebody comes
+    looking for work. The price is this -- with an idle queue, a job whose
+    worker died stays `PROCESSING` for as long as nobody asks for work, and a
+    poll on it keeps timing out in the meantime. Correct, and the alternative is
+    a second process to deploy, supervise and explain.
+    """
+    upload = await enqueue(client, aurora_token)
+    for _ in range(settings.job_max_attempts):
+        await client.post("/internal/jobs/claim", headers=INTERNAL)
+        await expire_lease(db, upload["job_id"])
+
+    # Time passes, the API keeps serving, and nobody claims.
+    document = await client.get(f"/documents/{upload['document_id']}", headers=auth(aurora_token))
+    assert document.json()["job"]["status"] == JobStatus.PROCESSING
+    assert document.json()["job"]["error_code"] is None
+
+    # One claim -- which finds nothing to hand out -- is what settles it.
+    assert (await client.post("/internal/jobs/claim", headers=INTERNAL)).status_code == 204
+
+    document = await client.get(f"/documents/{upload['document_id']}", headers=auth(aurora_token))
+    assert document.json()["job"]["status"] == JobStatus.FAILED
+    assert document.json()["job"]["error_code"] == "PROCESSING_TIMEOUT"
