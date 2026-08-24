@@ -25,26 +25,30 @@ def pdf(text: str | None) -> bytes:
     carries no text layer, which is what a photograph of a consultation note
     looks like to a parser. Reading it would need OCR.
     """
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        None,  # the page, filled in below once we know whether there are contents
-        None,  # the content stream, only when there is text
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ]
-
+    # Page and content stream first, because the two differ between the scanned
+    # file and the one with a text layer; everything else is the same either way.
     if text is None:
-        objects[2] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
-        objects[3] = b"<< >>"
+        page = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>"
+        contents = b"<< >>"
     else:
-        objects[2] = (
+        page = (
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"
         )
         # Escaped because `(` and `)` delimit a string literal in PDF syntax.
         escaped = text.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
         stream = b"BT /F1 12 Tf 72 720 Td (%s) Tj ET" % escaped.encode("latin-1")
-        objects[3] = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)
+        contents = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)
+
+    # Object numbers are positions in this list, starting at 1, and the
+    # references above (`3 0 R`, `4 0 R`, `5 0 R`) depend on that order.
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        page,
+        contents,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
 
     out = bytearray(HEADER)
     offsets = []

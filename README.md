@@ -359,13 +359,26 @@ The `.pdf` fixtures are **built**, not committed as opaque bytes: `tests/pdfs.py
 writes a minimal valid PDF, with or without a text layer, and the difference
 between those two files is the whole point of the `.pdf` tests.
 
-## Linting
+## Linting and type checking
 
 ```bash
 uv run ruff check .          # report
 uv run ruff check . --fix    # fix what is auto-fixable
 uv run ruff format .         # format
+uv run ty check              # type check
 ```
+
+`ruff` does not know about types, and this codebase is asynchronous end to end:
+a forgotten `await` raises nothing — it returns a coroutine that never runs, and
+the suite still passes unless an assertion happens to touch that path. `ty` is
+what catches that class of mistake, which is why it sits in the same gate as the
+tests rather than in a nightly job.
+
+Three suppressions exist, all of them in `app/core/errors.py`. Starlette types an
+exception handler as taking a bare `Exception`, while each handler here takes the
+exception it actually handles; the checker is right in general and wrong here,
+and widening the signatures to silence it would trade a true annotation for a
+false one. The reasoning sits in the comment above them.
 
 ---
 

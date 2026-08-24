@@ -109,7 +109,14 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
 
 
 def register_error_handlers(app: FastAPI) -> None:
-    app.add_exception_handler(DomainError, handle_domain_error)
-    app.add_exception_handler(StarletteHTTPException, handle_http_exception)
-    app.add_exception_handler(RequestValidationError, handle_validation_error)
+    # Starlette types the handler as taking a bare `Exception`, while each one
+    # below takes the exception it actually handles -- and a narrower parameter
+    # is not a valid substitute for a wider one, so the type checker objects.
+    # It is right in general and wrong here: Starlette only ever calls a handler
+    # with the class it was registered for. Widening the signatures to `Exception`
+    # to satisfy the checker would trade a true annotation for a false one.
+    # The bare `type: ignore` is the one form both `ty` and pyright honour (D57).
+    app.add_exception_handler(DomainError, handle_domain_error)  # type: ignore
+    app.add_exception_handler(StarletteHTTPException, handle_http_exception)  # type: ignore
+    app.add_exception_handler(RequestValidationError, handle_validation_error)  # type: ignore
     app.add_exception_handler(Exception, handle_unexpected_error)
