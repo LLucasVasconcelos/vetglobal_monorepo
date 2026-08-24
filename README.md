@@ -20,9 +20,9 @@ holding any per-request state in process memory.
 > 📋 **[Decisions and tradeoffs, in full](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
 > — eleven chapters on why this is built the way it is: the seven ambiguities the
 > assignment left open and what was chosen for each, the long poll and the race it
-> has to avoid, the queue, twelve security findings and how each one surfaced, what
-> was deliberately left out, and the questions I would ask before building this for
-> real. The summary below is the short version.
+> has to avoid, the queue and its three concurrency guards, the security review,
+> what was deliberately left out, and the questions I would ask before building
+> this for real. The summary below is the short version.
 
 ---
 
