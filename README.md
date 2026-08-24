@@ -17,12 +17,13 @@ holding any per-request state in process memory.
 
 **In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
 
-> 📋 **[Decisions and tradeoffs, in full](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
-> — eleven chapters on why this is built the way it is: the seven ambiguities the
-> assignment left open and what was chosen for each, the long poll and the race it
-> has to avoid, the queue and its three concurrency guards, the security review,
-> what was deliberately left out, and the questions I would ask before building
-> this for real. The summary below is the short version.
+> 📋 **[Why it is built this way](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
+> — five short chapters, about twenty-five minutes: the seven ambiguities the
+> assignment left open and what was chosen for each, the six decisions that hold
+> the design up with the cost each one charged, how it was verified, and what I
+> would ask before building this for real. An
+> [appendix](https://claude.ai/code/artifact/9242552d-4fce-496d-b57b-b31769700719)
+> carries the detail, and is not needed to follow the main document.
 
 ---
 
