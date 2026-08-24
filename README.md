@@ -17,11 +17,21 @@ holding any per-request state in process memory.
 
 **In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
 
-> 📋 **[Why it is built this way](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
-> — five short chapters, about twenty-five minutes: the seven questions that had
-> no obvious answer and what I chose for each, the six decisions that hold the
-> design up with the cost each one charged, how it was verified, and what I would
-> ask before building this for real.
+### Documentation
+
+**[Decisions and tradeoffs](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
+· *the design notes asked for in the brief* — five short chapters, about
+twenty-five minutes: the seven questions that had no obvious answer and what was
+chosen for each, the six decisions that hold the design up with the cost each one
+charged, how it was verified, and what I would ask before building this for real.
+
+**[VetGlobal por Dentro](https://claude.ai/code/artifact/22ccfe07-90ce-40fb-87d3-9fb434f2d8a8)**
+· *full developer documentation* — how to bring it up, where everything lives,
+the seven invariants that must not break, the API contract, the job lifecycle,
+and how to add a route or a migration without breaking the rules.
+
+Both are also served by the API itself: the interactive docs at `/docs` narrate
+the whole flow, and every route declares its own error codes there.
 
 ---
 

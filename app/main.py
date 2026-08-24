@@ -24,10 +24,15 @@ paste the token from step 1, and the padlocked routes open up.
    isolation below work on data you created yourself.
 2. **`POST /pets`** — a pet belongs to the tenant *in your token*. It is never
    read from the body, so there is no field here to point at another clinic.
-3. **`POST /pets/{pet_id}/documents`** — send a `.txt`. Answers `202` with a
-   `job_id`, or `200` if this exact content was already uploaded for this pet
-   (deduplicated by SHA-256; if the previous attempt failed, a fresh job is
-   created for the same document).
+3. **`POST /pets/{pet_id}/documents`** — send a `.txt` or a `.pdf`. Answers
+   `202` with a `job_id`, or `200` if this exact content was already uploaded
+   for this pet (deduplicated by SHA-256; if the previous attempt failed, a
+   fresh job is created for the same document).
+
+   A file is accepted for what its **bytes** are, not for what its name says.
+   And a `.pdf` is only checked for *being* a PDF here — whether it holds
+   readable text is decided by the worker, which is why a scanned document
+   comes back later as `PDF_HAS_NO_TEXT_LAYER` rather than as an upload error.
 4. **`GET /documents/{document_id}/poll?after_job_id=…`** — held open for up to
    25 seconds. It answers the instant the job reaches `DONE` or `FAILED`.
    `after_job_id=0` means "whatever the latest job of this document is".
@@ -35,6 +40,18 @@ paste the token from step 1, and the padlocked routes open up.
    what the worker calls. These take an `X-Internal-Token` header instead of the
    JWT, and they exist as HTTP routes precisely so you can play the worker by
    hand here and watch the poll in step 4 answer.
+
+   There is a real worker too — `worker.py`, a separate process that runs
+   `claim → summarize → complete` over these same two routes. Run two of them
+   and they take different jobs at the same instant, which is `SKIP LOCKED`
+   doing its job.
+
+**Also here:** `GET /documents` lists your clinic's documents with each one's
+latest job, so one call answers *which of these are ready*. And
+`GET /internal/stats` reports how the queue is doing — **two** durations, kept
+apart on purpose: how long jobs wait to be picked up, and how long the work
+itself takes. A rising total tells you something got worse; only the split tells
+you whether to add workers or to look at the code.
 
 ### Two timeouts that are not the same thing
 

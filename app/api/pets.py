@@ -76,7 +76,7 @@ async def get_pets(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Step 3 — upload a document and enqueue its job",
     description=(
-        "Send a `.txt` file. The bytes are stored in Postgres, not on disk, so any instance "
+        "Send a `.txt` or a `.pdf`. The bytes are stored in Postgres, not on disk, so any "
         "of the API can serve them (D14).\n\n"
         "**Two success codes, and they mean different things.**\n\n"
         "- `202 Accepted` — new content. A document and a job were created; the job is "
@@ -96,7 +96,10 @@ async def get_pets(
             "401": AUTH_401,
             "404": "PET_NOT_FOUND — no such pet, or it belongs to another clinic",
             "413": "FILE_TOO_LARGE — over the 10 MB limit",
-            "415": "UNSUPPORTED_FILE_TYPE or FILE_CONTENT_MISMATCH — not a .txt, or not UTF-8",
+            "415": (
+                "UNSUPPORTED_FILE_TYPE or FILE_CONTENT_MISMATCH — neither .txt nor .pdf, "
+                "or the bytes are not what the extension claims"
+            ),
             "422": "FILE_EMPTY_OR_TOO_SHORT, FILENAME_TOO_LONG or FILENAME_INVALID",
         }
     ),
@@ -106,7 +109,9 @@ async def post_document(
     principal: CurrentPrincipal,
     db: Db,
     response: Response,
-    file: UploadFile = File(description="A UTF-8 .txt file, up to 10 MB."),  # noqa: B008
+    file: UploadFile = File(  # noqa: B008
+        description="A UTF-8 `.txt` or a `.pdf`, up to 10 MB."
+    ),
 ) -> UploadResponse:
     raw = await file.read()
     outcome = await upload_document(db, principal, pet_id, file.filename or "", raw)
