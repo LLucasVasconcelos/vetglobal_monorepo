@@ -25,7 +25,7 @@ twenty-five minutes: the seven questions that had no obvious answer and what was
 chosen for each, the six decisions that hold the design up with the cost each one
 charged, how it was verified, and what I would ask before building this for real.
 
-**[VetGlobal por Dentro](https://claude.ai/code/artifact/22ccfe07-90ce-40fb-87d3-9fb434f2d8a8)**
+**[VetGlobal Dev Docs](https://claude.ai/code/artifact/22ccfe07-90ce-40fb-87d3-9fb434f2d8a8)**
 · *full developer documentation* — how to bring it up, where everything lives,
 the seven invariants that must not break, the API contract, the job lifecycle,
 and how to add a route or a migration without breaking the rules.
