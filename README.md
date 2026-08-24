@@ -6,13 +6,13 @@ A document is uploaded for a pet, a summarization job is queued, a worker
 processes it, and the client follows progress through long polling — without
 holding any per-request state in process memory.
 
-> **Status:** complete and running. Twelve routes, **211 tests** against a real
-> PostgreSQL. Every functional requirement of the assignment is implemented,
-> `.txt` and `.pdf` alike, along with six of its eight bonus items.
+> **Status:** complete and running. Thirteen routes, **233 tests** against a real
+> PostgreSQL. Every functional requirement is implemented, `.txt` and `.pdf`
+> alike, along with seven of the eight bonus items.
 >
 > **Deliberately not built** — each one explained in
-> [What is not here](#what-is-not-here): real summarization, a frontend, OCR,
-> row-level security, cloud storage, deployment, encryption at rest, rate
+> [What is not here](#what-is-not-here): real summarization, a frontend, roles,
+> OCR, row-level security, object storage, deployment, encryption at rest, rate
 > limiting.
 
 **In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
@@ -53,6 +53,7 @@ assignment specified.
 | `GET` | `/documents/{document_id}/poll?after_job_id=0` | held open for 25 seconds |
 | `POST` | `/internal/jobs/claim` | the worker's side — takes one job off the queue |
 | `POST` | `/internal/jobs/{job_id}/complete` | the worker's result |
+| `GET` | `/internal/stats` | queue health — the two durations, kept apart |
 | `GET` | `/health` | answers without touching the database |
 
 Job states: `ENQUEUED → PROCESSING → DONE | FAILED`.
@@ -97,293 +98,13 @@ clickable at <http://127.0.0.1:8000/docs>.
 
 ---
 
-## Design decisions and tradeoffs
+## Why it is built this way
 
-### 1. Long polling: PostgreSQL is the broker
-
-`complete` emits `NOTIFY`; each API instance holds **one** dedicated connection
-in `LISTEN document_events` and fans the event out in memory to the polls parked
-on that instance.
-
-```
-GET /documents/10/poll?after_job_id=0
- 1. subscribe to document 10          ← before anything is read
- 2. SELECT the job                    ← already finished? answer now
- 3. wait: the notification (~1 ms), or a re-read every 5s, or 25s expire
-
-POST /internal/jobs/55/complete
- └─ BEGIN
-    UPDATE jobs SET status='DONE' ... WHERE id=55 AND status='PROCESSING'
-    SELECT pg_notify('document_events', '{"document_id":10,...}')
-    COMMIT ──► Postgres releases the notification here
-```
-
-**Why this and not a poll loop:** it is a bonus point the assignment names, it
-gives ~1 ms latency instead of a query every second per pending client, and the
-queue already lives in Postgres — adding Redis to deliver one boolean would be
-an extra moving part to deploy, supervise and explain.
-
-**What makes it correct and not merely fast.** `NOTIFY` is **not persistent**:
-it reaches whoever is listening at that instant and is otherwise gone. So every
-waiter also re-reads the row every five seconds. That re-read is not a
-belt-and-braces afterthought — it is the reason the whole design is allowed to
-keep waiters in process memory (see [stateless](#10-stateless-and-what-it-cost)).
-*Memory makes it fast; the database makes it true.*
-
-**The trap, and the ordering that avoids it.** Subscribe **before** reading. In
-the other order, a job that finishes in between emits its notification with
-nobody listening: the read already said `PROCESSING`, the event is gone, and the
-client waits the full 25 seconds for something that already happened. There is a
-test that completes a job in exactly that window
-(`test_a_job_finishing_between_the_read_and_the_wait_is_not_missed`), and it was
-checked against a deliberately inverted implementation to confirm it fails
-there. Several poll tests also push the re-read interval past the poll's own
-timeout, so that **only** a notification can answer them — at the default five
-seconds, a broken `NOTIFY` would still go green, five seconds late.
-
-**The notification is emitted inside the transaction that closes the job**, not
-after the commit. Postgres holds it until `COMMIT`, so a listener is never woken
-for a row it cannot read yet, and a commit that fails announces nothing. Emitted
-afterwards in a second transaction, both windows open: a wake-up racing its own
-data, and a committed job whose announcement was lost with the next line of
-code.
-
-**The payload is not the answer.** It carries `{document_id, job_id, status}`,
-but a woken poll re-reads the row; only `document_id` is used, to know whom to
-wake. A notification can be delivered twice, out of order, or be about a job
-this client is not waiting for — trusting it would put correctness in the
-message instead of in the database.
-
-### 2. Two timeouts that are not the same thing
-
-This distinction is the one most likely to be got wrong by a client, so the API
-is shaped to make confusing them hard.
-
-| | poll timeout | job lease |
-|---|---|---|
-| what ran out | this HTTP request (25s) | the processing itself (60s per attempt, 3 attempts) |
-| the job is | alive, still working | over |
-| the answer | `200` with `timed_out: true` | `200` with `result.job.status: FAILED`, `error_code: PROCESSING_TIMEOUT` |
-| the client should | ask again | show the failure |
-
-Treating the first as the second makes the UI announce an error on a document
-that is about to be ready.
-
-### 3. What the poll returns on timeout — a declared deviation
-
-The assignment offered `204 No Content` or `200 null`. This is a third option,
-so it needs justifying:
-
-```json
-{ "result": null, "awaiting_job_id": 55, "timed_out": true }
-```
-
-`204` has nowhere to carry the cursor, and a bare `null` cannot distinguish
-"not yet" from "finished, and empty". This envelope answers both and hands back
-what to call again with, so the client keeps no state between requests.
-
-On success `result` is **the document** — byte for byte what
-`GET /documents/{id}` returns, with the job and its `summary` nested inside. One
-parser for both endpoints, and no ambiguity about whose `id` is at the top: an
-earlier version answered with the job alone, whose `id` sat next to a
-`document_id` in the url that is usually the same small number, with nothing in
-the payload saying which was which.
-
-`after_job_id=0` — the value in the assignment's own example, where no job `0`
-exists — means *the latest job of this document*, resolved server-side. The
-answer always names the id it resolved to. A client that kept its `job_id` from
-the upload should send it: `0` is a convenience, not the main path.
-
-### 4. Idempotency, in both places it matters
-
-**Upload.** Deduplicated by `sha256` of the content plus `pet_id`. The same file
-twice answers `200` with the existing `document_id` instead of `202`, and no
-second job is created. The exception is a document whose last job **failed** —
-re-uploading is how a client asks to try again, and it gets a *new* job rather
-than a rewritten one, so the failed attempt stays readable. The unique index on
-`(pet_id, sha256)` is what settles two simultaneous uploads of the same bytes;
-the loser reads back the winner's row.
-
-**Completion.** At-least-once delivery *guarantees* a worker will sometimes
-report the same job twice, so a repeat must be silent: same verdict again is
-`200` with `applied: false`, and nothing is written. But `FAILED` over a job
-already `DONE` is not a retry, it is a bug — that answers `409`, because
-swallowing it would let an error replace a summary.
-
-The failure payload accepts both shapes: `{"status": "FAILED", "error": "…"}`,
-which is the assignment's own example, and `{"status": "FAILED", "error_code":
-"…", "message": "…"}`, which is what the rest of this API speaks. The first
-fills in as the second, with `WORKER_REPORTED_FAILURE` for the code — "the
-worker said it failed, without saying what kind" is exactly what that payload
-carries. Prefer the second: a code is what a client branches on.
-
-### 5. Queue semantics without a queue
-
-The `jobs` table *is* the queue. Every state change is a race with another
-worker, so each one is a **single conditional `UPDATE`** with the check in the
-`WHERE`, never a `SELECT` followed by an `UPDATE` — there is no window between
-deciding and doing.
-
-```sql
-UPDATE jobs SET status='PROCESSING', attempts=attempts+1, ...
- WHERE id = (SELECT id FROM jobs WHERE status='ENQUEUED'
-             ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
-```
-
-`SKIP LOCKED` is what makes it a queue rather than a table two workers fight
-over: a row someone else is claiming is stepped over instead of waited on, so N
-workers make N different claims at the same instant.
-
-**The lease** is what makes a dead worker recoverable. A claim comes with a
-deadline; a job still `PROCESSING` past it is available again, and fails with
-`PROCESSING_TIMEOUT` once its attempts are spent. `attempt` is a fencing token —
-a worker that stalled past its lease and reports late is told `409
-JOB_LEASE_LOST`, because it is writing about work somebody else already redid.
-
-**Assumed cost:** expired leases are swept **inside the claim**, not by a
-background sweeper. The queue is only read by workers, so a stuck job matters
-exactly when somebody comes looking for work. The price is that with a
-completely idle queue, a dead worker's job stays `PROCESSING` until the next
-claim — a test pins that, so it stays a decision rather than becoming a
-surprise.
-
-### 6. `.pdf`: verified at the door, read by the worker
-
-A `.txt` is verifiable in full on arrival — decode it and you know everything.
-A `.pdf` is only verifiable as *being a PDF*: the first five bytes are `%PDF-`,
-and that is all the route can say without opening the file. Whether it holds
-readable text is a question for whoever parses it.
-
-So the work splits: the route checks the extension, the size and the header and
-stores the bytes; the worker opens it. Extraction is slow and it fails — in the
-route, an upload would stop answering `202` in milliseconds and start holding
-the connection open through a 200-page document, and an unreadable file would
-become an **upload error** when it is really a **job that failed**.
-
-A scanned document — a photograph of a consultation note, which is the normal
-case in a clinic — is a perfectly valid PDF with no text layer. It gets its own
-`error_code`, `PDF_HAS_NO_TEXT_LAYER`, rather than the generic extraction
-failure: with it, a client can tell the owner "send this as text"; without it,
-they only know something went wrong. Reading those would need OCR, which is out
-of scope.
-
-One consequence in the contract: the claim now carries `content_type` plus
-either `content` (text) or `content_base64` (bytes). Two fields where one would
-do, deliberately — the `.txt` path stays readable in the claim, and reading a
-consultation note straight out of the response is half of what makes that
-endpoint a demonstration. The cost is base64's 33%: a 10 MB PDF is 13 MB of
-JSON. A raw-bytes endpoint would avoid it at the price of a second round trip
-between claiming a job and starting it, which is exactly what sending the text
-with the claim was meant to avoid.
-
-### 7. Tenant isolation, and why `404` and not `403`
-
-Every clinic is a tenant. `tenant_id` comes from the **token**, never from a
-body field or a query parameter — so there is nothing in a request to point at
-another clinic. A resource belonging to someone else answers `404`: ids are
-sequential, `GET /documents/41` is a guess anyone can make, and `403` would
-confirm the guess was right, which is itself the leak.
-
-**Why the ids are sequential, and what UUID would cost.** Sequential ids are
-what make this rule *testable*: `/documents/41` is a guess anyone can make, so
-the filter above has to be real rather than assumed. UUIDs would not have made
-the API safer — an unguessable id is obscurity, and it leaks through a log, a
-screenshot or a shared link, while the query stays unfiltered underneath.
-
-What they would cost is ordering. Six queries here order by id, and two of them
-mean something: `ORDER BY jobs.id` **is** the FIFO of the queue, and
-`ORDER BY jobs.id DESC LIMIT 1` is "the latest attempt at this document".
-`created_at` does not substitute — rows written in one transaction share a
-timestamp and break the tie at random, which also makes offset pagination repeat
-or skip rows. UUIDv7, being time-ordered, would preserve all six; UUIDv4 would
-not.
-
-The honest cost of what is here: sequential ids leak volume. Register, upload
-once, read your id, and you know roughly how much the platform has processed.
-The moment to switch is when an id starts appearing in a URL that leaves the
-organization — and then it goes in *alongside* the tenant filter, never instead
-of it.
-
-**The token is a claim, not the answer.** Each authenticated request reads the
-user row and builds the principal from *it*, not from the JWT payload. Without
-that, a deleted account keeps reading records until its token expires, and
-anyone holding the signing key could mint a token for any `tenant_id` and the
-isolation would obey. The cost is one primary-key lookup on a request that was
-going to hit the database anyway; what it buys is revocation that works *now*.
-
-### 8. Files live in the database, as `bytea`
-
-The alternative was local disk, and local disk contradicts a requirement the
-assignment itself wrote: stateless with multiple instances. It also brings the
-orphan problem — either the transaction rolls back and the file is left behind,
-or the row commits and the write failed. In the database, bytes and metadata
-commit together, and the `sha256` cannot drift from the content it describes.
-
-**Assumed cost:** this does not scale to large files or high volume. With real
-traffic the answer is object storage with the metadata still in Postgres, and
-the tradeoff would invert around the size where streaming beats transactional
-consistency. For `.txt` clinical notes with a 10 MB ceiling, it does not.
-
-### 9. One error shape, and no 500 for anything predictable
-
-```json
-{ "status": "FAILED", "error_code": "PROCESSING_TIMEOUT", "message": "…" }
-```
-
-`error_code` is stable and for branching on; `message` is for a person and may
-be reworded. Every failure leaves this way — including the ones FastAPI would
-otherwise answer itself, like a validation error or an unknown path, which would
-be a second error format.
-
-A `500` means a bug on our side, and it is the one answer the client gets no
-explanation for: the explanation is the leak — table names, file paths, and in
-one real case the clinical record itself, which is why bound parameters are kept
-out of database errors. Tests pin both halves: predictable input never produces
-a `500`, and a genuine crash still answers in the envelope without carrying the
-exception out.
-
-### 10. Stateless, and what it cost
-
-The requirement is that request handling must not depend on in-memory state that
-would break with multiple instances. Two things here look like they might:
-
-**The waiters.** Each instance keeps its own set of parked polls in memory. It
-does not break the requirement, because correctness never depends on it: every
-waiter re-reads the database on a timer, and `NOTIFY` reaches *every* listening
-instance, not just the one that closed the job. There is a test that closes a
-job and announces it from an entirely separate connection — the shape of a
-second instance — and the waiter in this process wakes anyway. Another kills the
-listener's backend with `pg_terminate_backend` to check that it reconnects on
-its own, since a listener that stayed down would silently degrade every poll on
-that instance to the re-read.
-
-**The uploaded file.** Same rule, applied to disk instead of memory: nothing is
-written to local disk, which is what [decision 8](#8-files-live-in-the-database-as-bytea)
-is about.
-
----
-
-## The ambiguity the assignment left open
-
-Its own list of unspecified details, and what was chosen for each:
-
-| question | answer |
-|---|---|
-| How should the queue be simulated? | The `jobs` table, claimed with `FOR UPDATE SKIP LOCKED` and a lease. No broker. |
-| How should files be stored? | `bytea` in Postgres — [decision 8](#8-files-live-in-the-database-as-bytea). |
-| How should duplicate uploads be handled? | Deduplicated by `sha256` + `pet_id`; `200` instead of `202`. A failed last job gets a new job. |
-| What if the worker completes the same job twice? | Same verdict: `200`, `applied: false`, silent. Contradicting verdict: `409`. |
-| What should polling return on timeout? | `200` with an envelope carrying the cursor — [decision 3](#3-what-the-poll-returns-on-timeout--a-declared-deviation). |
-| How should tenant isolation be modeled? | One schema, `tenant_id` on every row, taken from the token only. |
-| What if the document does not exist? | `404` — the same answer as a document belonging to someone else, deliberately. |
-
-Two questions the assignment did not ask, answered anyway because the code could
-not proceed without them: what `after_job_id=0` means when job `0` cannot exist,
-and how a first account is created when there is nothing to seed (open
-registration, which also makes tenant isolation something a reviewer can verify
-on data they created themselves).
-
----
+The design notes live in **[Decisions and tradeoffs](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
+— why the file sits in Postgres rather than on disk, why the long poll re-reads
+the row even though it is notified, how the queue guards against two workers and
+against one that stalled, why another clinic's document answers `404`, and what
+each of those cost.
 
 ## What is not here
 
@@ -394,7 +115,6 @@ the difference between what is designed and what runs:
 |---|---|
 | a containerized `docker compose up --scale worker=2` | would mean containerizing the API, and there is no `Dockerfile` — that is adjacent to deployment, which is out of scope. Two terminals do the same demonstration, and a test does it unattended |
 | React frontend | none — the API is exercised through `/docs` or `curl`. If one is added it will be a demonstration of the polling loop, not a sample of frontend quality, and it would be said so plainly |
-| observability | `enqueued_at`, `claimed_at` and `finished_at` are recorded per job, so duration is *available*; nothing reports on it |
 | keyset pagination | `GET /pets` and `GET /documents` page with `limit` / `offset` and a `total`. Keyset would be the honest answer for a list that receives inserts between pages — a document uploaded mid-walk makes an offset page repeat or skip a row. What holds it off is scale, not the argument |
 
 **Real summarization.** `summarize()` in `worker.py` takes the opening sentences
