@@ -18,12 +18,10 @@ holding any per-request state in process memory.
 **In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
 
 > 📋 **[Why it is built this way](https://claude.ai/code/artifact/684f4ad1-c969-4c78-ad72-1d9ffd22fee1)**
-> — five short chapters, about twenty-five minutes: the seven ambiguities the
-> assignment left open and what was chosen for each, the six decisions that hold
-> the design up with the cost each one charged, how it was verified, and what I
-> would ask before building this for real. An
-> [appendix](https://claude.ai/code/artifact/9242552d-4fce-496d-b57b-b31769700719)
-> carries the detail, and is not needed to follow the main document.
+> — five short chapters, about twenty-five minutes: the seven questions that had
+> no obvious answer and what I chose for each, the six decisions that hold the
+> design up with the cost each one charged, how it was verified, and what I would
+> ask before building this for real.
 
 ---
 
