@@ -81,6 +81,17 @@ def validate_upload(filename: str, raw: bytes) -> str:
             f"Only {TEXT_SUFFIX} and {PDF_SUFFIX} files are accepted.",
         )
 
+    if "\x00" in filename:
+        # The filename does not come through Pydantic -- it arrives on the
+        # multipart part -- so it needs the guard of D56 spelled out here. A NUL
+        # cannot be stored in a Postgres text column, and the error it raises is
+        # not an IntegrityError, so it escaped every handler as a 500.
+        raise DomainError(
+            422,
+            "FILENAME_INVALID",
+            "Filename must not contain a NUL byte.",
+        )
+
     if len(filename) > MAX_FILENAME_LENGTH:
         # Refused rather than truncated: a stored name that is not the name that
         # was uploaded is a quiet lie in a record meant to be evidence (D14).

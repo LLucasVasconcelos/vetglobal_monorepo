@@ -3,6 +3,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.schemas.text import SafeText
+
 # bcrypt silently ignores everything past the 72nd byte. Declaring the ceiling
 # means a long password is refused out loud instead of quietly truncated -- and
 # a user never ends up with a password that is not the one they typed.
@@ -13,14 +15,17 @@ class LoginRequest(BaseModel):
     # Deliberately `str` and not `EmailStr`. On login the address is a lookup
     # key compared against a stored value, not a new record to validate: format
     # checking here only turns "no such user" (401) into "malformed" (422).
-    email: str = Field(min_length=3, max_length=255)
-    password: str = Field(min_length=1)
+    email: SafeText = Field(min_length=3, max_length=255)
+    password: SafeText = Field(min_length=1)
 
 
 # Only the technical ceiling lives in the schema. The policy itself -- length
 # and composition -- is `validate_password_strength`, so that every rule is
 # stated once and answers with `WEAK_PASSWORD` instead of a generic 422.
-Password = Annotated[str, Field(max_length=BCRYPT_MAX_BYTES)]
+# `SafeText` here too, and not only for the column: bcrypt is a C library and
+# treats the password as a C string, so everything past a NUL is silently
+# ignored -- `abc\0def` and `abc` would be the same password.
+Password = Annotated[SafeText, Field(max_length=BCRYPT_MAX_BYTES)]
 
 
 class RegisterRequest(BaseModel):
@@ -28,7 +33,7 @@ class RegisterRequest(BaseModel):
 
     # `EmailStr` here and not on login, because this is where a new record is
     # written: a typo accepted now is a login nobody can ever perform.
-    tenant_name: str = Field(min_length=2, max_length=120)
+    tenant_name: SafeText = Field(min_length=2, max_length=120)
     email: EmailStr
     password: Password
 

@@ -2,12 +2,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.text import SafeText
+
 
 class PetCreate(BaseModel):
     # No `tenant_id` here, and there never will be: it comes from the signed
     # token (invariant 4). A field for it would be a field an attacker can set.
-    name: str = Field(min_length=1, max_length=120)
-    owner_name: str = Field(min_length=1, max_length=120)
+    name: SafeText = Field(min_length=1, max_length=120)
+    owner_name: SafeText = Field(min_length=1, max_length=120)
 
 
 class PetResponse(BaseModel):

@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.base import PG_INT_MAX
 from app.models import JobStatus
+from app.schemas.text import SafeText
 
 
 class ClaimedJob(BaseModel):
@@ -72,20 +73,20 @@ class CompleteRequest(BaseModel):
     status: Literal[JobStatus.DONE, JobStatus.FAILED] = Field(
         description="The terminal state to move to. ENQUEUED and PROCESSING are not accepted."
     )
-    summary: str | None = Field(
+    summary: SafeText | None = Field(
         default=None, max_length=MAX_SUMMARY_LENGTH, description="Required when status is DONE."
     )
-    error_code: str | None = Field(
+    error_code: SafeText | None = Field(
         default=None,
         max_length=64,
         description="Required when status is FAILED. Machine-readable, in the D22 shape.",
     )
-    message: str | None = Field(
+    message: SafeText | None = Field(
         default=None,
         max_length=MAX_MESSAGE_LENGTH,
         description="Human-readable reason for a failure.",
     )
-    error: str | None = Field(
+    error: SafeText | None = Field(
         default=None,
         max_length=MAX_MESSAGE_LENGTH,
         description=(

@@ -97,7 +97,7 @@ async def get_pets(
             "404": "PET_NOT_FOUND — no such pet, or it belongs to another clinic",
             "413": "FILE_TOO_LARGE — over the 10 MB limit",
             "415": "UNSUPPORTED_FILE_TYPE or FILE_CONTENT_MISMATCH — not a .txt, or not UTF-8",
-            "422": "FILE_EMPTY_OR_TOO_SHORT or FILENAME_TOO_LONG",
+            "422": "FILE_EMPTY_OR_TOO_SHORT, FILENAME_TOO_LONG or FILENAME_INVALID",
         }
     ),
 )
