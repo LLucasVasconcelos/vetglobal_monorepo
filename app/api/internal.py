@@ -1,9 +1,13 @@
-from fastapi import APIRouter, Depends, Response, status
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.deps import Db, ResourceId, require_internal_token
 from app.core.errors import documented_errors
 from app.schemas.job import ClaimedJob, CompleteRequest, CompleteResponse
+from app.schemas.stats import QueueStats
 from app.services.jobs import claim_next_job, complete_job
+from app.services.stats import queue_stats
 
 # The guard is on the router, not on each route: a new `/internal/*` route added
 # later is protected because it is here, not because somebody remembered to
@@ -75,3 +79,30 @@ async def post_claim(db: Db) -> ClaimedJob | Response:
 )
 async def post_complete(job_id: ResourceId, data: CompleteRequest, db: Db) -> CompleteResponse:
     return await complete_job(db, job_id, data)
+
+
+@router.get(
+    "/stats",
+    response_model=QueueStats,
+    summary="How the queue is doing — the two durations, and who is holding it",
+    description=(
+        "Operational view of the queue, across **every** clinic. It lives behind the "
+        "internal token and not the JWT for the same reason the other two routes do: the "
+        "queue belongs to no tenant, so there is no isolation here to fall back on.\n\n"
+        "**Two durations, and the split is the point.** `waiting` is `enqueued_at → "
+        "claimed_at`; `processing` is `claimed_at → finished_at`. A rising total says "
+        "something got worse — only the split says what to do about it. Waiting grew: add "
+        "workers. Processing grew: the work itself got slower.\n\n"
+        "`p95` alongside the average, because an average hides the tail, and the tail is "
+        "what someone waiting on a poll actually feels.\n\n"
+        "`retried` counts jobs that took more than one attempt — which is the rate at which "
+        "workers are dying. `busiest_tenants` answers the fairness question: the queue is "
+        "ordered by arrival, so one clinic uploading ten thousand documents delays everyone "
+        "behind it."
+    ),
+)
+async def get_stats(
+    db: Db,
+    top_tenants: Annotated[int, Query(ge=1, le=50)] = 5,
+) -> QueueStats:
+    return await queue_stats(db, top_tenants)

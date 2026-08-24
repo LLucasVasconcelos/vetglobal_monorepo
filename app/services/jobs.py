@@ -12,8 +12,10 @@ exactly why `/internal/*` is closed behind a shared secret rather than a JWT
 (D27) -- there is no isolation left here to fall back on.
 """
 
+import json
+import logging
 from base64 import b64encode
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +26,38 @@ from app.db.listener import notify_job_finished
 from app.models import Document, Job, JobStatus
 from app.schemas.job import ClaimedJob, CompleteRequest, CompleteResponse
 from app.services.documents import TEXT_CONTENT_TYPE
+
+logger = logging.getLogger("jobs")
+
+
+def _seconds(start: datetime | None, end: datetime | None) -> float | None:
+    return round((end - start).total_seconds(), 3) if start and end else None
+
+
+def _log_completion(job: Job) -> None:
+    """One line per finished job, with the two clocks of D55.
+
+    JSON so it parses anywhere without a library, and **ids only**: no summary,
+    no filename, no message. A log outlives the request and is read by anyone who
+    can read logs -- putting a clinical record in one was a real finding here
+    (D36), and it is not going back in through the observability door.
+    """
+    logger.info(
+        json.dumps(
+            {
+                "event": "job_completed",
+                "job_id": job.id,
+                "document_id": job.document_id,
+                "tenant_id": job.tenant_id,
+                "status": job.status.value,
+                "attempts": job.attempts,
+                "error_code": job.error_code,
+                "waited_seconds": _seconds(job.enqueued_at, job.claimed_at),
+                "processing_seconds": _seconds(job.claimed_at, job.finished_at),
+            }
+        )
+    )
+
 
 PROCESSING_TIMEOUT_MESSAGE = (
     "Processing did not finish within the allowed time, after "
@@ -195,6 +229,7 @@ async def complete_job(db: AsyncSession, job_id: int, data: CompleteRequest) -> 
             status=updated.status.value,
         )
         await db.commit()
+        _log_completion(updated)
         return _view(updated, applied=True)
 
     # Zero rows. The write already happened -- or provably did not -- so this
