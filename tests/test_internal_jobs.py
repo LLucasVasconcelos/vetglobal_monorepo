@@ -619,3 +619,47 @@ async def test_error_sent_with_done_is_refused(client, aurora_token):
     )
 
     assert response.status_code == 422
+
+
+# --- the claim's partial indexes (D54) --------------------------------------
+
+
+async def test_the_partial_indexes_the_claim_depends_on_exist(db):
+    """Pinned because dropping them is silent: the claim keeps answering, and
+    only starts scanning the whole table once the queue is busy (D54).
+
+    A performance number would be flaky in a suite; the index existing is not.
+    """
+    present = set(
+        (
+            await db.scalars(
+                text("SELECT indexname FROM pg_indexes WHERE tablename = 'jobs'")
+            )
+        ).all()
+    )
+
+    assert {"ix_jobs_claimable", "ix_jobs_expiring"} <= present
+
+
+async def test_a_queue_full_of_live_leases_still_hands_out_the_enqueued_job(
+    client, aurora_token, db
+):
+    """The shape that motivated the indexes: many workers busy, one job waiting.
+
+    Correctness, not speed -- but it is the case the plain `(status, id)` index
+    could not serve, and the one nobody had exercised before.
+    """
+    busy = [await enqueue(client, aurora_token, content=NOTE + f" {n}".encode()) for n in range(5)]
+    for _ in busy:
+        assert (await client.post("/internal/jobs/claim", headers=INTERNAL)).status_code == 200
+
+    # Every one of them is held by a worker whose lease is alive.
+    await db.execute(text("UPDATE jobs SET lease_expires_at = now() + interval '5 minutes'"))
+    await db.commit()
+
+    waiting = await enqueue(client, aurora_token, content=NOTE + b" the one that waits")
+
+    claim = await client.post("/internal/jobs/claim", headers=INTERNAL)
+
+    assert claim.status_code == 200
+    assert claim.json()["job_id"] == waiting["job_id"], "stepped over the only claimable job"

@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -34,6 +34,26 @@ class Job(Base):
         Index("ix_jobs_document_id_id", "document_id", "id"),
         # Claim hot path (D21): `WHERE status = 'ENQUEUED' ORDER BY id`.
         Index("ix_jobs_status_id", "status", "id"),
+        # The two halves of "claimable", indexed separately and *partially*
+        # (D54). The full index above cannot serve the second half: on a busy
+        # system half the table is `PROCESSING`, so matching it means a hundred
+        # thousand index entries, and Postgres correctly decides that scanning
+        # the table is cheaper -- measured at 3200 buffers and 13.5 ms per
+        # claim, on the hot path, per worker, per second.
+        #
+        # Partial is what makes these cheap to keep: a `DONE` job is in neither
+        # index, so they grow with the *live queue* rather than with the table.
+        Index(
+            "ix_jobs_claimable",
+            "id",
+            postgresql_where=text("status = 'ENQUEUED'"),
+        ),
+        Index(
+            "ix_jobs_expiring",
+            "lease_expires_at",
+            "id",
+            postgresql_where=text("status = 'PROCESSING'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
