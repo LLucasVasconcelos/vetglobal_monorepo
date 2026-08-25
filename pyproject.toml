@@ -15,6 +15,11 @@ dependencies = [
     "bcrypt>=4.2",
     "python-multipart>=0.0.32",
     "pypdf>=6.16.2",
+    # Runtime dependency of worker.py, not a test tool. It was in the dev group
+    # until the Dockerfile ran `uv sync --no-dev` and the worker died on
+    # `import httpx` -- on a machine where `uv sync` installs dev by default,
+    # nothing distinguishes the two (D58).
+    "httpx>=0.28",
 ]
 
 [dependency-groups]
@@ -22,7 +27,6 @@ dev = [
     "ruff>=0.8",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "httpx>=0.28",
     "ty>=0.0.74",
 ]
 
