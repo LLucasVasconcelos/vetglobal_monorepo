@@ -15,7 +15,7 @@ holding any per-request state in process memory.
 > OCR, row-level security, object storage, deployment, encryption at rest, rate
 > limiting.
 
-**In a hurry?** [Setup](#setup) · [Running](#running) · [Tests](#tests)
+**In a hurry?** [Setup](#setup) · [Running](#running) · [In containers](#in-containers) · [Tests](#tests)
 
 ### Documentation
 
@@ -113,7 +113,6 @@ the difference between what is designed and what runs:
 
 | | today |
 |---|---|
-| a containerized `docker compose up --scale worker=2` | would mean containerizing the API, and there is no `Dockerfile` — that is adjacent to deployment, which is out of scope. Two terminals do the same demonstration, and a test does it unattended |
 | React frontend | none — the API is exercised through `/docs` or `curl`. If one is added it will be a demonstration of the polling loop, not a sample of frontend quality, and it would be said so plainly |
 | keyset pagination | `GET /pets` and `GET /documents` page with `limit` / `offset` and a `total`. Keyset would be the honest answer for a list that receives inserts between pages — a document uploaded mid-walk makes an offset page repeat or skip a row. What holds it off is scale, not the argument |
 
@@ -161,6 +160,11 @@ You need exactly two things installed:
 You do **not** need a system Python. `uv` downloads and pins the required
 interpreter (3.12, see `.python-version`) on its own, isolated from anything
 already installed on your machine.
+
+There is a second way to run this, **entirely in containers**, where `uv` is not
+needed at all — see [In containers](#in-containers). The setup below is the one
+development uses, and the one to follow if you only want to read the code and
+poke at `/docs`.
 
 ---
 
@@ -332,6 +336,47 @@ Nothing requires the worker to be running: `/internal/jobs/claim` and
 be driven by hand from Swagger or `curl` — which is what the assignment asked
 for when it said the completion endpoint simulates a worker callback.
 
+### In containers
+
+The same three processes, without `uv` and without a Python on your machine.
+`.env` is still the one file you have to fill in, exactly as in [Setup](#setup),
+and `DB_HOST` there does **not** need changing — inside the network the API is
+told `database` regardless of what the file says for the host.
+
+```bash
+docker compose --profile app up -d --build
+```
+
+That builds one image and runs it three ways: migrations, then the API, then the
+worker. Each waits for the one before it — the API only starts after
+`alembic upgrade head` has exited cleanly, and the worker only after the API
+answers `/health`. There is no step to remember and nothing to run by hand.
+
+```bash
+docker compose --profile app up -d --scale worker=2   # two workers, one queue
+docker compose logs -f worker                          # watch them take jobs
+docker compose --profile app down                      # stop, keep the data
+```
+
+`--scale worker=2` is the `SKIP LOCKED` demonstration above with no second
+terminal: two containers claim different jobs at the same instant. Kill one
+mid-job (`docker kill`) and its lease hands the work to the other.
+
+**`docker compose up -d` with no profile still starts PostgreSQL and nothing
+else**, which is what [Setup](#setup) describes and what development uses — the
+API on the host with `--reload`, against the containerized database. The profile
+is opt-in precisely so adding it changed nothing about the flow that already
+worked.
+
+The API is published on one explicit address, same rule as the database:
+`127.0.0.1:8000` by default, `API_BIND_HOST` and `API_PORT` in `.env` to move it.
+
+**This is not a deployment.** There is no reverse proxy, no TLS, no secret
+manager, and `--reload` is off but nothing else about the image is tuned for
+production. What it is: the fastest way to run the whole thing on a machine that
+has Docker, and the answer to *"can two workers really run at once?"* that does
+not require you to take a test's word for it.
+
 ## Tests
 
 ```bash
@@ -344,6 +389,13 @@ migrates **its own database**, `vetglobal_test`, on first run, so nothing you
 register or upload by hand is ever touched: the tests need to truncate freely
 between cases, and a suite that truncates the database you are also using
 destroys your work. Override the name with `TEST_DB_NAME` if it collides.
+
+The suite also runs inside the image, against the same containerized PostgreSQL,
+with nothing installed on your machine:
+
+```bash
+docker compose --profile test run --rm test
+```
 
 What it covers, beyond the happy path: deduplication and retry after failure,
 double completion and contradicting completion, two simultaneous claims taking
@@ -418,6 +470,24 @@ The notification is not arriving, and the re-read is doing all the work. The
 listener logs `listening on document_events` at startup; if it does not, check
 that the application can reach the database at all.
 
+**`the --mount option requires BuildKit` on `docker compose --profile app up --build`**
+It should not happen — the `Dockerfile` avoids BuildKit-only syntax on purpose,
+so it builds on the classic builder too. If you see it, something else in your
+setup is injecting it.
+
+**`Conflict. The container name "/vetglobal_postgres" is already in use`**
+Another checkout of this repository has that container, running or stopped. The
+name is fixed so `docker exec -it vetglobal_postgres psql -U vetglobal` is
+predictable; the price is that two copies of the repository cannot both have it.
+A project name does not help — `container_name` overrides it. Either remove the
+other container, or drop a `docker-compose.override.yml` next to this one:
+
+```yaml
+services:
+  database:
+    container_name: vetglobal_postgres_second
+```
+
 ---
 
 ## Project layout
@@ -438,6 +508,8 @@ app/
 worker.py       the separate process, outside app/ on purpose
 migrations/     Alembic migrations
 tests/
+Dockerfile      one image, run three ways: migrations, API, worker
+docker-compose.yml
 ```
 
 `worker.py` sits **outside** `app/` and imports nothing from it. That is the

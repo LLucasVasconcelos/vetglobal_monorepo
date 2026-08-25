@@ -1,0 +1,32 @@
+# What must never reach the build context, and why.
+
+# Secrets. The image reads its configuration from the environment at run time;
+# a baked .env would ship the JWT signing key inside the layer.
+.env
+
+# Host-specific and rebuilt inside the image anyway. .venv is also the largest
+# thing in the repository by far, and copying it would slow every build.
+.venv/
+.tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# History and local tooling, of no use to a running container.
+.git/
+.gitignore
+.github/
+.claude/
+.ai-jail/
+handoff/
+scripts/
+
+# Documentation. The image serves /docs from the code, not from these.
+docs/
+*.md
+!README.md
+
+# Local artefacts.
+test_docs/
+*.log

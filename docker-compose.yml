@@ -28,6 +28,99 @@ services:
       timeout: 5s
       retries: 10
 
+  # --- everything below is behind a profile -------------------------------
+  #
+  # `docker compose up -d` still starts PostgreSQL and nothing else, which is
+  # what the README's setup describes and what development uses: the API runs
+  # on the host with --reload, against this database.
+  #
+  # The profiles are the other way to run it, all of it in containers:
+  #
+  #   docker compose --profile app up -d --build          API + worker
+  #   docker compose --profile app up -d --scale worker=2 two workers
+  #   docker compose --profile test run --rm test         the suite
+  #
+  # x-app is the part all three share: the same image, the same .env, and the
+  # two variables that have to differ inside the network — DB_HOST is a service
+  # name here, never the loopback address the host uses.
+
+  migrate:
+    profiles: ["app"]
+    build: &app_build
+      context: .
+      target: runtime
+    image: vetglobal-backend:latest
+    env_file: .env
+    environment: &app_env
+      DB_HOST: database
+      DB_PORT: 5432
+    depends_on:
+      database:
+        condition: service_healthy
+    # A one-shot service rather than a step inside the API's command: with two
+    # API replicas, a command that migrates would run two migrations at once.
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    profiles: ["app"]
+    build: *app_build
+    image: vetglobal-backend:latest
+    env_file: .env
+    environment: *app_env
+    ports:
+      # Same rule as the database above: one explicit address, never 0.0.0.0.
+      - "${API_BIND_HOST:-127.0.0.1}:${API_PORT:-8000}:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # /health answers without touching Postgres, which is what makes it a
+      # liveness probe rather than a database probe. Uses the interpreter that
+      # is already here — the slim image has no curl.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health")
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  worker:
+    profiles: ["app"]
+    build: *app_build
+    image: vetglobal-backend:latest
+    env_file: .env
+    environment:
+      # No database variables at all: the worker is a client of the API and has
+      # no way into the queue except the two /internal/* routes (D47). It needs
+      # INTERNAL_TOKEN, which comes from the same .env.
+      API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    # Deliberately no container_name: a fixed name is what would make
+    # `--scale worker=2` fail, and two workers racing for one queue is the whole
+    # point of SKIP LOCKED.
+    command: ["python", "worker.py"]
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    env_file: .env
+    environment: *app_env
+    depends_on:
+      database:
+        condition: service_healthy
+    # The suite creates and migrates its own database (vetglobal_test) against
+    # this same server, so it never touches what was registered by hand.
+
 volumes:
   vetglobal_db_data:
     driver: local
