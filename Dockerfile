@@ -1,4 +1,7 @@
-# syntax=docker/dockerfile:1
+# No `# syntax=` directive: it pins a BuildKit frontend, and the point of this
+# file is that it uses no BuildKit-only syntax. Without it the build needs no
+# registry fetch before it can start, and the classic builder — which ignores
+# the directive anyway — behaves identically.
 
 # One image, run three ways: the API, the worker, and the migration step.
 # They are separate services with separate lifecycles, but they are the same
@@ -28,9 +31,12 @@ WORKDIR /app
 # Dependencies before source. This layer is keyed on the lock file alone, so
 # editing a route reinstalls nothing.
 #
-# No `--mount=type=cache` on the uv cache: it needs BuildKit, and a Dockerfile
-# that only builds on machines with buildx installed is a Dockerfile that fails
-# on somebody else's. The layer cache above already covers the common case.
+# No `--mount=type=cache` on the uv download cache. It is BuildKit-only syntax,
+# and it buys almost nothing here: measured cold, with every layer discarded,
+# this RUN takes 1.9s. That is what the mount would be shaving, and only on the
+# rare build where uv.lock actually changed. Trading a Dockerfile that builds
+# anywhere for one second is a bad trade — the machine that matters is the one
+# belonging to whoever clones this, and buildx is not installed by default.
 COPY pyproject.toml uv.lock .python-version ./
 RUN uv sync --locked --no-dev
 
